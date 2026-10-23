@@ -5,7 +5,8 @@
 > **Primary language:** Kotlin\
 > **Build:** Gradle + GitHub Actions\
 > **Cloud database:** Turso\
-> **AI providers:** Groq + additional model providers\
+> **AI providers:** Qwen3-4B (main) + Groq (backup) + additional model
+> providers\
 > **Core concept:** Native Android AI assistant with a Game Space
 > subsystem and phone-control capabilities.
 
@@ -22,7 +23,8 @@ LilyAi is a native Android AI assistant that can:
     permissions allow it.
 5.  Analyze the current screen when the user explicitly requests it and
     the required capture permissions are available.
-6.  Use Groq and other AI providers through a provider/model router.
+6.  Use Qwen3-4B as the main model and Groq as the backup, plus other AI
+    providers, through a provider/model router.
 7.  Store persistent user preferences, game profiles, conversations,
     memories, and useful statistics using local storage plus Turso cloud
     synchronization.
@@ -52,7 +54,8 @@ Space functionality.
           |                      |                      |
           |                +-----+------+              |
           |                |            |              |
-          |              Groq      Other Models        |
+          |            Qwen3-4B       Groq             |
+          |             (main)      (backup)           |
           |                                             |
           +----------------------+----------------------+
                                  |
@@ -79,7 +82,8 @@ LilyAi
 +-- AI Layer
 |   |
 |   +-- Model Router
-|   +-- Groq Provider
+|   +-- Qwen3-4B Provider (main)
+|   +-- Groq Provider (backup)
 |   +-- Other AI Providers
 |   +-- Vision Provider
 |   +-- Conversation Manager
@@ -193,6 +197,7 @@ LilyAi/
 |           +-- ai/
 |           |   +-- LilyAiEngine.kt
 |           |   +-- ModelRouter.kt
+|           |   +-- QwenClient.kt
 |           |   +-- GroqClient.kt
 |           |   +-- VisionClient.kt
 |           |   +-- ToolRegistry.kt
@@ -721,6 +726,8 @@ Most played
 
 AI should be provider-independent.
 
+Qwen3-4B is the main model. Groq is the backup.
+
 Architecture:
 
 ``` text
@@ -729,13 +736,13 @@ LilyAiEngine
       v
 ModelRouter
       |
-+-----+------------------+
-|                        |
-v                        v
-GroqProvider        OtherProvider
-                         |
-                         v
-                   Vision/Reasoning
++-----+------------------+------------------+
+|                        |                  |
+v                        v                  v
+QwenProvider         GroqProvider       OtherProvider
+(main)               (backup)                |
+                                             v
+                                       Vision/Reasoning
 ```
 
 Define a common provider interface:
@@ -748,18 +755,31 @@ interface AiProvider {
 }
 ```
 
-Potential providers:
+Providers:
 
--   Groq
+-   Qwen3-4B (main)
+-   Groq (backup)
 -   Other cloud model providers
--   Future local model
--   Vision model provider
+-   Vision model provider (Qwen3-4B is text-only)
 
 ------------------------------------------------------------------------
 
 # 19. Model Router
 
 Do not send every request to the same model.
+
+Default order for language requests:
+
+``` text
+ModelRouter
+    |
+    v
+QwenProvider (main)
+    |
+    +-- success --> response
+    |
+    +-- failure --> GroqProvider (backup)
+```
 
 Example routing:
 
@@ -773,7 +793,7 @@ Local intent/tool system
 launchGame()
 ```
 
-No cloud model is necessary.
+No AI model is necessary.
 
 For:
 
@@ -790,7 +810,7 @@ Screen capture
 Vision model
      |
      v
-Language model
+Language model (Qwen3-4B, Groq as backup)
 ```
 
 For:
@@ -822,9 +842,35 @@ Kotlin ToolRegistry
 
 ------------------------------------------------------------------------
 
-# 20. Groq Integration
+# 20. AI Providers: Qwen3-4B (Main) and Groq (Backup)
 
-Groq should be implemented as one AI provider.
+Qwen3-4B is the main AI model. Groq is the backup, used when the main
+model cannot answer.
+
+Each one is implemented as a provider behind `AiProvider`.
+
+## 20.1 Qwen3-4B Provider (main)
+
+``` text
+QwenProvider
+|
++-- Model loading / connection
++-- Request builder
++-- Streaming response
++-- Tool calling
++-- Error handling
++-- Timeout handling
++-- Usage metadata
+```
+
+Notes:
+
+-   Qwen3-4B is a text model. Screen understanding needs a separate
+    vision provider.
+-   Where Qwen3-4B runs (on the device or on a hosted endpoint) is not
+    decided yet. See 20.4.
+
+## 20.2 Groq Provider (backup)
 
 ``` text
 GroqProvider
@@ -843,6 +889,49 @@ Never hard-code secrets in the APK.
 Do not ship a permanent privileged API key inside the application.
 
 Use a secure backend/token strategy appropriate to the deployment model.
+
+## 20.3 Failover Policy
+
+``` text
+Request
+   |
+   v
+ModelRouter
+   |
+   v
+QwenProvider (main)
+   |
+   +-- success ------------------> Response
+   |
+   +-- error / timeout / unavailable
+           |
+           v
+     GroqProvider (backup)
+           |
+           v
+        Response
+```
+
+Rules:
+
+-   Try Qwen3-4B first for every language request that needs a model.
+-   Fall back to Groq when Qwen3-4B errors, times out, or is not
+    available.
+-   Try Qwen3-4B again on the next request.
+-   Record which provider answered (`provider` in `ai_messages`).
+-   If both fail, tell the user the AI is unavailable. Game Space keeps
+    working.
+
+## 20.4 Open Decision
+
+Where Qwen3-4B runs:
+
+-   On the device: works offline and keeps data private, but uses RAM
+    and battery while gaming.
+-   Hosted endpoint: lighter on the phone, but needs internet and the
+    same secret handling as Groq.
+
+To be decided.
 
 ------------------------------------------------------------------------
 
@@ -1222,7 +1311,7 @@ Room/SQLite stores fast local state.
               |                 |
               v                 v
           Local AI          Cloud AI
-          / Tools            / Groq
+          / Tools            / Groq (backup)
               |                 |
               v                 v
           Room/SQLite         Turso
@@ -1286,6 +1375,9 @@ Authenticated service/backend
 The exact production credential architecture should be chosen based on
 whether LilyAi is a personal/private app, distributed APK, or public
 application.
+
+If Qwen3-4B runs on a hosted endpoint, the same rule applies to its
+credentials.
 
 ## Android permissions
 
@@ -1511,8 +1603,9 @@ Build:
 Build:
 
 -   AiProvider interface.
--   Groq provider.
--   Model router.
+-   Qwen3-4B provider (main).
+-   Groq provider (backup).
+-   Model router with failover from Qwen3-4B to Groq.
 -   Conversation manager.
 -   Tool registry.
 -   Tool calling.
@@ -1641,7 +1734,7 @@ Test:
 -   GameDetector.
 -   GameRepository.
 -   GameProfile.
--   ModelRouter.
+-   ModelRouter (including Qwen3-4B to Groq failover).
 -   ToolRegistry.
 -   SyncManager.
 -   Memory manager.
@@ -1688,7 +1781,13 @@ Priority order:
 If AI fails:
 
 ``` text
-AI unavailable
+Qwen3-4B unavailable
+    |
+    v
+Groq backup
+    |
+    v
+Both unavailable
     |
     v
 Game Space still works
@@ -1770,7 +1869,8 @@ The final architecture should be understood as:
              |                   |                   |
              |          +--------+--------+          |
              |          |                 |          |
-             |        Groq          Other Models     |
+             |      Qwen3-4B           Groq          |
+             |       (main)          (backup)        |
              |                                           
              +-------------------+-------------------+
                                  |
@@ -1799,7 +1899,8 @@ The final architecture should be understood as:
 3.  **Python is optional, not a core Android dependency.**
 4.  **Game Space must work without cloud AI.**
 5.  **AI must use a provider abstraction.**
-6.  **Groq is one provider, not the entire architecture.**
+6.  **Qwen3-4B is the main model and Groq is the backup. Neither is the
+    entire architecture.**
 7.  **Use a ModelRouter for task-specific model selection.**
 8.  **AI interacts with Android through ToolRegistry.**
 9.  **Never give an AI model unrestricted Android control.**
@@ -1845,7 +1946,9 @@ The first usable LilyAi release should contain:
 ### AI
 
 -   [ ] LilyAi chat
--   [ ] Groq provider
+-   [ ] Qwen3-4B provider (main)
+-   [ ] Groq provider (backup)
+-   [ ] Failover from Qwen3-4B to Groq
 -   [ ] AI provider interface
 -   [ ] Model router
 -   [ ] Tool registry
@@ -1900,8 +2003,8 @@ It is:
 
 > **A native Android AI assistant that combines Game Space
 > functionality, a persistent AI overlay, controlled Android automation,
-> multi-model AI inference, Groq-powered fast responses, and
-> Turso-backed cloud memory/state.**
+> multi-model AI inference with Qwen3-4B as the main model and Groq as
+> the backup, and Turso-backed cloud memory/state.**
 
 The fundamental relationship is:
 
@@ -1912,8 +2015,11 @@ Kotlin
 AI
   = Intelligence / Reasoning / Vision / Conversation
 
+Qwen3-4B
+  = Main AI model
+
 Groq
-  = Fast AI inference provider
+  = Backup AI inference provider
 
 Turso
   = Cloud persistence / synchronization
