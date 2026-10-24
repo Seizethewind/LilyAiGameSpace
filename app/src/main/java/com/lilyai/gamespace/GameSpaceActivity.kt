@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
@@ -18,7 +19,7 @@ import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.capture.ScreenshotManager
 import com.lilyai.overlay.GameOverlayService
 
-// Game library (tap to launch, long-press to remove) plus the screenshot and overlay controls.
+// Game library (tap to launch, long-press to remove) plus the screenshot, overlay and tap-test controls.
 class GameSpaceActivity : Activity() {
 
     private lateinit var status: TextView
@@ -44,6 +45,20 @@ class GameSpaceActivity : Activity() {
         val overlay = Button(this).apply {
             text = "Show overlay"
             setOnClickListener { showOverlay(askPermission = true) }
+        }
+        // Tap test: the target counts real touches. The second button taps it through
+        // the accessibility service, so the count going up proves gestures work.
+        var taps = 0
+        val tapTarget = Button(this).apply {
+            text = "Tap target: 0"
+            setOnClickListener {
+                taps++
+                text = "Tap target: $taps"
+            }
+        }
+        val autoTap = Button(this).apply {
+            text = "Auto-tap the target 5 times"
+            setOnClickListener { autoTap(tapTarget, 5) }
         }
         val addGame = Button(this).apply {
             text = "Add game"
@@ -72,6 +87,8 @@ class GameSpaceActivity : Activity() {
             addView(openSettings)
             addView(screenshot)
             addView(overlay)
+            addView(tapTarget)
+            addView(autoTap)
             addView(addGame)
             addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
@@ -119,6 +136,27 @@ class GameSpaceActivity : Activity() {
             return
         }
         startForegroundService(Intent(this, GameOverlayService::class.java))
+    }
+
+    // Taps the middle of the target button through the accessibility service, one tap at a time.
+    private fun autoTap(target: View, remaining: Int) {
+        if (remaining == 0) return
+        val service = LilyAccessibilityService.instance
+        if (service == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        val location = IntArray(2)
+        target.getLocationOnScreen(location)
+        val x = location[0] + target.width / 2f
+        val y = location[1] + target.height / 2f
+        service.tap(x, y) { performed ->
+            if (performed) {
+                target.postDelayed({ autoTap(target, remaining - 1) }, 500)
+            } else {
+                toast("Tap failed or was cancelled")
+            }
+        }
     }
 
     // The delay gives you time to switch to a game before the capture.
