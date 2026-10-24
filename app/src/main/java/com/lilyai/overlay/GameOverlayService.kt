@@ -18,11 +18,12 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.autoplay.AutoPlayer
 import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenshotManager
 import kotlin.math.abs
 
-// A small draggable button over other apps. Tap it to show Screenshot, Read text and Stop.
+// A small draggable button over other apps. Tap it to show Screenshot, Read text, Auto and Stop.
 // Runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
@@ -43,6 +44,7 @@ class GameOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        AutoPlayer.stop()
         root?.let { windowManager.removeView(it) }
         root = null
         super.onDestroy()
@@ -84,6 +86,10 @@ class GameOverlayService : Service() {
             visibility = View.GONE
             setOnClickListener { readScreen(output) }
         }
+        val auto = Button(this).apply {
+            text = AUTO_OFF
+            visibility = View.GONE
+        }
         val stop = Button(this).apply {
             text = "Stop"
             visibility = View.GONE
@@ -94,8 +100,24 @@ class GameOverlayService : Service() {
             addView(handle)
             addView(screenshot)
             addView(readText)
+            addView(auto)
             addView(stop)
             addView(output)
+        }
+
+        fun setMenuVisible(visible: Boolean) {
+            val state = if (visible) View.VISIBLE else View.GONE
+            screenshot.visibility = state
+            readText.visibility = state
+            auto.visibility = state
+            stop.visibility = state
+            if (!visible) output.visibility = View.GONE
+        }
+
+        // Starting Auto folds the menu away so only the small handle stays on screen.
+        auto.setOnClickListener {
+            toggleAuto(auto)
+            setMenuVisible(false)
         }
 
         params = WindowManager.LayoutParams(
@@ -111,11 +133,7 @@ class GameOverlayService : Service() {
         }
 
         handle.setOnTouchListener(dragAndTap(panel) {
-            val show = if (screenshot.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            screenshot.visibility = show
-            readText.visibility = show
-            stop.visibility = show
-            if (show == View.GONE) output.visibility = View.GONE
+            setMenuVisible(screenshot.visibility != View.VISIBLE)
         })
 
         windowManager.addView(panel, params)
@@ -202,12 +220,43 @@ class GameOverlayService : Service() {
         }, 400)
     }
 
+    // Starts or stops the autoplay loop with the words saved in the LilyAi app.
+    // Drag the handle away from anything the loop needs to tap: taps go to whatever is on top.
+    private fun toggleAuto(button: Button) {
+        if (AutoPlayer.running) {
+            AutoPlayer.stop()
+            button.text = AUTO_OFF
+            toastShort("Auto stopped")
+            return
+        }
+        val targets = AutoPlayer.targets(this)
+        if (targets.isEmpty()) {
+            toast("Set the Auto words in the LilyAi app first")
+            return
+        }
+        if (LilyAccessibilityService.instance == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        AutoPlayer.start(targets) { event ->
+            toastShort(event)
+            if (!AutoPlayer.running) button.text = AUTO_OFF
+        }
+        button.text = AUTO_ON
+        toastShort("Auto started: " + targets.joinToString())
+    }
+
     private fun toast(message: String) =
         Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+
+    private fun toastShort(message: String) =
+        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
 
     private companion object {
         const val CHANNEL_ID = "overlay"
         const val NOTIFICATION_ID = 1
         const val TAP_SLOP = 10
+        const val AUTO_ON = "Auto: ON"
+        const val AUTO_OFF = "Auto: OFF"
     }
 }

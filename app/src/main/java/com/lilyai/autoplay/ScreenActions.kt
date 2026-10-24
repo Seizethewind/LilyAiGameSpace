@@ -8,13 +8,21 @@ import com.lilyai.capture.ScreenshotManager
 // Building blocks for autoplay: look at the screen, find something, act on it.
 object ScreenActions {
 
-    /**
-     * Takes a screenshot, finds the first line of text containing [query] (ignoring case)
-     * and taps its center. The result is the text that was tapped.
-     */
+    /** Taps the first line of text containing [query] (ignoring case). */
     fun tapText(
         service: LilyAccessibilityService,
         query: String,
+        onResult: (Result<ScreenText>) -> Unit
+    ) = tapAny(service, listOf(query), onResult)
+
+    /**
+     * Takes a screenshot, finds the first word from [queries] that appears on screen and taps
+     * the center of its line. List order is priority. Fails with NoSuchElementException when
+     * none of the words is on screen.
+     */
+    fun tapAny(
+        service: LilyAccessibilityService,
+        queries: List<String>,
         onResult: (Result<ScreenText>) -> Unit
     ) {
         ScreenshotManager.captureBitmap(service) { captured ->
@@ -22,9 +30,12 @@ object ScreenActions {
                 ScreenReader.read(bitmap) { outcome ->
                     bitmap.recycle()
                     outcome.onSuccess { lines ->
-                        val match = lines.firstOrNull { it.text.contains(query, ignoreCase = true) }
+                        val match = queries.firstNotNullOfOrNull { query ->
+                            lines.firstOrNull { it.text.contains(query, ignoreCase = true) }
+                        }
                         if (match == null) {
-                            onResult(Result.failure(NoSuchElementException("\"$query\" not found on screen")))
+                            val wanted = queries.joinToString(" / ")
+                            onResult(Result.failure(NoSuchElementException("Not found on screen: $wanted")))
                         } else {
                             // Screenshot pixels are screen pixels, so the bounds can be tapped directly.
                             service.tap(match.bounds.exactCenterX(), match.bounds.exactCenterY()) { tapped ->
