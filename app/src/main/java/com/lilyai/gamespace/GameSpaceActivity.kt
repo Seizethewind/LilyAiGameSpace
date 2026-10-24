@@ -3,6 +3,7 @@ package com.lilyai.gamespace
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -15,8 +16,9 @@ import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.capture.ScreenshotManager
+import com.lilyai.overlay.GameOverlayService
 
-// Game library (tap to launch, long-press to remove) plus the Phase 1 screenshot proof.
+// Game library (tap to launch, long-press to remove) plus the screenshot and overlay controls.
 class GameSpaceActivity : Activity() {
 
     private lateinit var status: TextView
@@ -39,6 +41,10 @@ class GameSpaceActivity : Activity() {
             text = "Screenshot in 5 seconds"
             setOnClickListener { screenshotAfterDelay() }
         }
+        val overlay = Button(this).apply {
+            text = "Show overlay"
+            setOnClickListener { showOverlay(askPermission = true) }
+        }
         val addGame = Button(this).apply {
             text = "Add game"
             setOnClickListener { showAddDialog() }
@@ -46,6 +52,8 @@ class GameSpaceActivity : Activity() {
         list = ListView(this).apply {
             setOnItemClickListener { _, _, position, _ ->
                 val game = games[position]
+                // The overlay starts with the game when the permission is already granted.
+                showOverlay(askPermission = false)
                 if (!GameLauncher.launch(this@GameSpaceActivity, game.packageName)) {
                     toast("Cannot launch ${game.name}")
                 }
@@ -63,6 +71,7 @@ class GameSpaceActivity : Activity() {
             addView(status)
             addView(openSettings)
             addView(screenshot)
+            addView(overlay)
             addView(addGame)
             addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
@@ -97,6 +106,19 @@ class GameSpaceActivity : Activity() {
                 refreshList()
             }
             .show()
+    }
+
+    private fun showOverlay(askPermission: Boolean) {
+        if (!Settings.canDrawOverlays(this)) {
+            if (askPermission) {
+                toast("Allow LilyAi to display over other apps, then tap Show overlay again")
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                )
+            }
+            return
+        }
+        startForegroundService(Intent(this, GameOverlayService::class.java))
     }
 
     // The delay gives you time to switch to a game before the capture.
