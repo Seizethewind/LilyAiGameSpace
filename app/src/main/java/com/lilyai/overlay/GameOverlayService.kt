@@ -70,7 +70,7 @@ class GameOverlayService : Service() {
         windowManager = getSystemService(WindowManager::class.java)
 
         val handle = Button(this).apply { text = "L" }
-        // Shows the text found on screen. Tap it to hide it.
+        // Shows the text found on screen, or the Auto log. Tap it to hide it.
         val output = TextView(this).apply {
             visibility = View.GONE
             textSize = 12f
@@ -108,6 +108,26 @@ class GameOverlayService : Service() {
             text = AUTO_OFF
             visibility = View.GONE
         }
+        // Cycles how often Auto looks at the screen: 1, 2, 3 or 5 seconds.
+        val speed = Button(this).apply {
+            text = speedLabel()
+            visibility = View.GONE
+            setOnClickListener {
+                val next = AutoPlayer.cycleInterval(this@GameOverlayService)
+                text = "Speed: ${next / 1000}s"
+            }
+        }
+        // Shows what Auto did: how many looks and taps, and the latest events.
+        val log = Button(this).apply {
+            text = "Auto log"
+            visibility = View.GONE
+            setOnClickListener {
+                val events = AutoPlayer.recentEvents().take(LOG_LINES)
+                output.text = AutoPlayer.summary() + "\n" +
+                    events.joinToString("\n").ifEmpty { "No events yet" }
+                output.visibility = View.VISIBLE
+            }
+        }
         val stop = Button(this).apply {
             text = "Stop"
             visibility = View.GONE
@@ -120,6 +140,8 @@ class GameOverlayService : Service() {
             addView(readText)
             addView(teachButton)
             addView(auto)
+            addView(speed)
+            addView(log)
             addView(stop)
             addView(output)
             addView(teach)
@@ -131,10 +153,13 @@ class GameOverlayService : Service() {
             readText.visibility = state
             teachButton.visibility = state
             auto.visibility = state
+            speed.visibility = state
+            log.visibility = state
             stop.visibility = state
             if (visible) {
                 // Auto can also be started or stopped by the assistant, so show the real state.
                 auto.text = if (AutoPlayer.running) AUTO_ON else AUTO_OFF
+                speed.text = speedLabel()
             } else {
                 output.visibility = View.GONE
                 teach.visibility = View.GONE
@@ -166,6 +191,8 @@ class GameOverlayService : Service() {
         windowManager.addView(panel, params)
         root = panel
     }
+
+    private fun speedLabel() = "Speed: ${AutoPlayer.intervalSeconds(this)}s"
 
     // Drag moves the overlay. A touch that barely moves counts as a tap.
     private fun dragAndTap(panel: View, onTap: () -> Unit) = object : View.OnTouchListener {
@@ -372,7 +399,7 @@ class GameOverlayService : Service() {
             toast("Turn on the LilyAi accessibility service first")
             return
         }
-        AutoPlayer.start(targets) { event ->
+        AutoPlayer.start(this, targets) { event ->
             toastShort(event)
             if (!AutoPlayer.running) button.text = AUTO_OFF
         }
@@ -395,5 +422,6 @@ class GameOverlayService : Service() {
         const val TEACH_WIDTH = 600
         const val TEACH_HEIGHT = 500
         const val MAX_CHOICES = 40
+        const val LOG_LINES = 10
     }
 }
