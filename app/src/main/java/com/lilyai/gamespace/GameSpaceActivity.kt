@@ -11,11 +11,13 @@ import android.provider.Settings
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.autoplay.ScreenActions
 import com.lilyai.capture.ScreenshotManager
 import com.lilyai.overlay.GameOverlayService
 
@@ -60,6 +62,15 @@ class GameSpaceActivity : Activity() {
             text = "Auto-tap the target 5 times"
             setOnClickListener { autoTap(tapTarget, 5) }
         }
+        // Find-and-tap test: type a word, switch to a game, and LilyAi taps that word on screen.
+        val tapQuery = EditText(this).apply {
+            hint = "Text to tap, for example Next"
+            setSingleLine()
+        }
+        val tapText = Button(this).apply {
+            text = "Tap this text in 5 seconds"
+            setOnClickListener { tapTextAfterDelay(tapQuery.text.toString().trim()) }
+        }
         val addGame = Button(this).apply {
             text = "Add game"
             setOnClickListener { showAddDialog() }
@@ -89,6 +100,8 @@ class GameSpaceActivity : Activity() {
             addView(overlay)
             addView(tapTarget)
             addView(autoTap)
+            addView(tapQuery)
+            addView(tapText)
             addView(addGame)
             addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
@@ -157,6 +170,29 @@ class GameSpaceActivity : Activity() {
                 toast("Tap failed or was cancelled")
             }
         }
+    }
+
+    // The delay gives you time to switch to a game before LilyAi looks at the screen.
+    private fun tapTextAfterDelay(query: String) {
+        if (query.isEmpty()) {
+            toast("Type the text to tap first")
+            return
+        }
+        if (LilyAccessibilityService.instance == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        toast("Switch to your game. Looking for \"$query\" in 5 seconds")
+        Handler(Looper.getMainLooper()).postDelayed({
+            val service = LilyAccessibilityService.instance
+            if (service == null) {
+                toast("Accessibility service was turned off")
+            } else {
+                ScreenActions.tapText(service, query) { result ->
+                    toast(result.fold({ "Tapped \"${it.text}\"" }, { "Failed: ${it.message}" }))
+                }
+            }
+        }, 5000)
     }
 
     // The delay gives you time to switch to a game before the capture.
