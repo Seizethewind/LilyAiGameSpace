@@ -7,7 +7,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import com.lilyai.ai.GroqClient
 
-// Where the Groq key and model name live. A saved key is hidden and cannot be edited until it is reset.
+// Where the Groq key and model name live. A saved key is encrypted, hidden, and cannot be
+// edited until it is reset.
 class SecretsScreen(private val activity: Activity) : Screen {
 
     override val title = "Secrets"
@@ -39,22 +40,29 @@ class SecretsScreen(private val activity: Activity) : Screen {
     private fun render() {
         keyArea.removeAllViews()
         if (GroqClient.savedKey(activity).isNotEmpty()) {
-            keyArea.addView(activity.label("A key is saved. It is hidden and cannot be edited. Reset it to enter a new one."))
+            keyArea.addView(
+                activity.label(
+                    "A key is saved and encrypted on this phone. It is hidden and cannot be edited. " +
+                        "Reset it to enter a new one."
+                )
+            )
             keyArea.addView(activity.pinkButton("Reset key") { confirmReset() })
         } else {
             val keyInput = activity.input("Paste your Groq API key", password = true)
             keyArea.addView(keyInput)
-            keyArea.addView(activity.pinkButton("Save key") {
-                val key = keyInput.text.toString().trim()
-                if (key.isEmpty()) {
-                    activity.toast("Paste the key first")
-                } else {
-                    GroqClient.saveKey(activity, key)
-                    render()
-                }
-            })
+            keyArea.addView(activity.pinkButton("Save key") { saveKey(keyInput.text.toString().trim()) })
         }
         modelInput.setText(GroqClient.savedModel(activity))
+    }
+
+    private fun saveKey(key: String) {
+        if (key.isEmpty()) {
+            activity.toast("Paste the key first")
+            return
+        }
+        runCatching { GroqClient.saveKey(activity, key) }
+            .onSuccess { render() }
+            .onFailure { activity.toast("Could not encrypt the key on this phone: ${it.message}") }
     }
 
     private fun confirmReset() {
