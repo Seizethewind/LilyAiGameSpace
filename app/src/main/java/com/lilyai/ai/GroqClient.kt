@@ -37,20 +37,33 @@ object GroqClient {
     }
 
     /**
-     * Sends one question. The model may call tools from [tools] before it answers.
-     * onResult runs on the main thread with the reply or the error.
+     * Sends one question after the earlier [history]. The model may call tools from [tools]
+     * before it answers. onResult runs on the main thread with the reply or the error.
      */
-    fun ask(apiKey: String, prompt: String, tools: ToolRegistry, onResult: (Result<String>) -> Unit) {
+    fun ask(
+        apiKey: String,
+        prompt: String,
+        history: List<ChatMessage>,
+        tools: ToolRegistry,
+        onResult: (Result<String>) -> Unit
+    ) {
         executor.execute {
-            val result = runCatching { request(apiKey, prompt, tools) }
+            val result = runCatching { request(apiKey, prompt, history, tools) }
             mainHandler.post { onResult(result) }
         }
     }
 
-    private fun request(apiKey: String, prompt: String, tools: ToolRegistry): String {
-        val messages = JSONArray()
-            .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
-            .put(JSONObject().put("role", "user").put("content", prompt))
+    private fun request(
+        apiKey: String,
+        prompt: String,
+        history: List<ChatMessage>,
+        tools: ToolRegistry
+    ): String {
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        history.forEach {
+            messages.put(JSONObject().put("role", it.role).put("content", it.content))
+        }
+        messages.put(JSONObject().put("role", "user").put("content", prompt))
 
         repeat(MAX_TOOL_ROUNDS) {
             val reply = send(apiKey, messages, tools)

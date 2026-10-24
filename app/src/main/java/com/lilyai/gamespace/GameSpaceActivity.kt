@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.ai.ConversationManager
 import com.lilyai.ai.GroqClient
 import com.lilyai.ai.ToolRegistry
 import com.lilyai.autoplay.AutoPlayer
@@ -81,7 +82,14 @@ class GameSpaceActivity : Activity() {
         val answer = TextView(this).apply { setTextIsSelectable(true) }
         val ask = Button(this).apply {
             text = "Ask LilyAi"
-            setOnClickListener { askLily(question.text.toString().trim(), answer) }
+            setOnClickListener { askLily(question, answer) }
+        }
+        val newChat = Button(this).apply {
+            text = "New chat"
+            setOnClickListener {
+                ConversationManager.clear()
+                answer.text = ""
+            }
         }
         // Tap test: the target counts real touches. The second button taps it through
         // the accessibility service, so the count going up proves gestures work.
@@ -138,6 +146,7 @@ class GameSpaceActivity : Activity() {
             addView(apiKey)
             addView(question)
             addView(ask)
+            addView(newChat)
             addView(answer)
             addView(tapTarget)
             addView(autoTap)
@@ -211,8 +220,9 @@ class GameSpaceActivity : Activity() {
         startForegroundService(Intent(this, GameOverlayService::class.java))
     }
 
-    private fun askLily(question: String, answer: TextView) {
+    private fun askLily(questionBox: EditText, answer: TextView) {
         val key = apiKey.text.toString().trim()
+        val question = questionBox.text.toString().trim()
         if (key.isEmpty()) {
             toast("Paste your Groq API key first")
             return
@@ -224,7 +234,11 @@ class GameSpaceActivity : Activity() {
         // Save the words as typed so the assistant sees and changes the current ones.
         AutoPlayer.saveTargets(this, autoWords.text.toString())
         answer.text = "Thinking..."
-        GroqClient.ask(key, question, tools) { result ->
+        GroqClient.ask(key, question, ConversationManager.history(), tools) { result ->
+            result.onSuccess { reply ->
+                ConversationManager.addExchange(question, reply)
+                questionBox.setText("")
+            }
             answer.text = result.fold({ it }, { "Failed: ${it.message}" })
             // The assistant may have changed the Auto words.
             autoWords.setText(AutoPlayer.rawTargets(this))
