@@ -8,7 +8,38 @@ import com.lilyai.capture.ScreenshotManager
 // Building blocks for autoplay: look at the screen, find something, act on it.
 object ScreenActions {
 
-    /** Taps the first line of text containing [query] (ignoring case). */
+    /** Takes a screenshot and reads the lines of text on it. */
+    fun readScreen(
+        service: LilyAccessibilityService,
+        onResult: (Result<List<ScreenText>>) -> Unit
+    ) {
+        ScreenshotManager.captureBitmap(service) { captured ->
+            captured.onSuccess { bitmap ->
+                ScreenReader.read(bitmap) { outcome ->
+                    bitmap.recycle()
+                    onResult(outcome)
+                }
+            }.onFailure { onResult(Result.failure(it)) }
+        }
+    }
+
+    /**
+     * The first line containing one of [queries] (ignoring case). List order is priority:
+     * a word earlier in the list wins over a later one.
+     */
+    fun findFirst(lines: List<ScreenText>, queries: List<String>): ScreenText? =
+        queries.firstNotNullOfOrNull { query ->
+            lines.firstOrNull { it.text.contains(query, ignoreCase = true) }
+        }
+
+    /** Taps the center of a line. Screenshot pixels are screen pixels, so no conversion is needed. */
+    fun tapLine(
+        service: LilyAccessibilityService,
+        line: ScreenText,
+        onDone: (Boolean) -> Unit
+    ) = service.tap(line.bounds.exactCenterX(), line.bounds.exactCenterY(), onDone)
+
+    /** Taps the first line containing [query] (ignoring case). */
     fun tapText(
         service: LilyAccessibilityService,
         query: String,
@@ -16,36 +47,27 @@ object ScreenActions {
     ) = tapAny(service, listOf(query), onResult)
 
     /**
-     * Takes a screenshot, finds the first word from [queries] that appears on screen and taps
-     * the center of its line. List order is priority. Fails with NoSuchElementException when
-     * none of the words is on screen.
+     * Finds the first word from [queries] that appears on screen and taps its line.
+     * Fails with NoSuchElementException when none of the words is on screen.
      */
     fun tapAny(
         service: LilyAccessibilityService,
         queries: List<String>,
         onResult: (Result<ScreenText>) -> Unit
     ) {
-        ScreenshotManager.captureBitmap(service) { captured ->
-            captured.onSuccess { bitmap ->
-                ScreenReader.read(bitmap) { outcome ->
-                    bitmap.recycle()
-                    outcome.onSuccess { lines ->
-                        val match = queries.firstNotNullOfOrNull { query ->
-                            lines.firstOrNull { it.text.contains(query, ignoreCase = true) }
-                        }
-                        if (match == null) {
-                            val wanted = queries.joinToString(" / ")
-                            onResult(Result.failure(NoSuchElementException("Not found on screen: $wanted")))
-                        } else {
-                            // Screenshot pixels are screen pixels, so the bounds can be tapped directly.
-                            service.tap(match.bounds.exactCenterX(), match.bounds.exactCenterY()) { tapped ->
-                                onResult(
-                                    if (tapped) Result.success(match)
-                                    else Result.failure(IllegalStateException("Tap failed or was cancelled"))
-                                )
-                            }
-                        }
-                    }.onFailure { onResult(Result.failure(it)) }
+        readScreen(service) { result ->
+            result.onSuccess { lines ->
+                val match = findFirst(lines, queries)
+                if (match == null) {
+                    val wanted = queries.joinToString(" / ")
+                    onResult(Result.failure(NoSuchElementException("Not found on screen: $wanted")))
+                } else {
+                    tapLine(service, match) { tapped ->
+                        onResult(
+                            if (tapped) Result.success(match)
+                            else Result.failure(IllegalStateException("Tap failed or was cancelled"))
+                        )
+                    }
                 }
             }.onFailure { onResult(Result.failure(it)) }
         }

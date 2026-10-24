@@ -81,7 +81,7 @@ class GameOverlayService : Service() {
             setPadding(16, 16, 16, 16)
             setOnClickListener { visibility = View.GONE }
         }
-        // The Teach list: tick the words Auto should tap for the current game.
+        // The Teach list: tick the words Auto should tap, or stop on, for the current game.
         val teach = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -274,7 +274,7 @@ class GameOverlayService : Service() {
         }, 400)
     }
 
-    // Teach: read the current screen and let the user tick the words Auto should tap.
+    // Teach: read the current screen and let the user tick the words Auto should tap or stop on.
     private fun teachScreen() {
         val service = LilyAccessibilityService.instance
         val panel = root
@@ -311,6 +311,7 @@ class GameOverlayService : Service() {
         val game = LilyAccessibilityService.foregroundGame
         val label = game?.let { appLabel(it) } ?: "default words"
         val saved = AutoPlayer.wordsFor(this, game).ifBlank { "none" }
+        val savedStops = AutoPlayer.stopWordsFor(this, game).ifBlank { "none" }
         // The words are saved in the order they are ticked, which is their priority.
         val picked = mutableListOf<String>()
 
@@ -334,6 +335,7 @@ class GameOverlayService : Service() {
             )
         }
 
+        // Save: Auto taps these words. Save as stop: Auto stops when it sees one of these.
         val save = Button(this).apply {
             text = "Save"
             setOnClickListener {
@@ -346,11 +348,24 @@ class GameOverlayService : Service() {
                 }
             }
         }
+        val saveStop = Button(this).apply {
+            text = "Save as stop"
+            setOnClickListener {
+                if (picked.isEmpty()) {
+                    toastShort("Tick the stop words first")
+                } else {
+                    AutoPlayer.addStopWords(this@GameOverlayService, game, picked)
+                    toastShort("Stop words for $label: " + picked.joinToString())
+                    teach.visibility = View.GONE
+                }
+            }
+        }
         val clear = Button(this).apply {
-            text = "Clear saved"
+            text = "Clear all"
             setOnClickListener {
                 AutoPlayer.saveWordsFor(this@GameOverlayService, game, "")
-                toastShort("Cleared the words for $label")
+                AutoPlayer.saveStopWordsFor(this@GameOverlayService, game, "")
+                toastShort("Cleared the words and stop words for $label")
                 teach.visibility = View.GONE
             }
         }
@@ -358,9 +373,13 @@ class GameOverlayService : Service() {
             text = "Close"
             setOnClickListener { teach.visibility = View.GONE }
         }
-        val buttons = LinearLayout(this).apply {
+        val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(save)
+            addView(saveStop)
+        }
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             addView(clear)
             addView(close)
         }
@@ -368,11 +387,13 @@ class GameOverlayService : Service() {
         teach.removeAllViews()
         teach.addView(line("Teach: $label", 14f))
         teach.addView(line("Saved: $saved", 12f))
+        teach.addView(line("Stops on: $savedStops", 12f))
         teach.addView(
             ScrollView(this).apply { addView(choices) },
             LinearLayout.LayoutParams(TEACH_WIDTH, TEACH_HEIGHT)
         )
-        teach.addView(buttons)
+        teach.addView(topRow)
+        teach.addView(bottomRow)
         teach.visibility = View.VISIBLE
     }
 
@@ -404,7 +425,9 @@ class GameOverlayService : Service() {
             if (!AutoPlayer.running) button.text = AUTO_OFF
         }
         button.text = AUTO_ON
-        toastShort("Auto started: " + targets.joinToString())
+        val stops = AutoPlayer.stopWords(this)
+        val stopNote = if (stops.isEmpty()) "" else ". Stops on: " + stops.joinToString()
+        toastShort("Auto started: " + targets.joinToString() + stopNote)
     }
 
     private fun toast(message: String) =
