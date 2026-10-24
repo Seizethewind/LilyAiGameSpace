@@ -12,11 +12,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 // Talks to Groq's OpenAI-compatible chat endpoint, including tool calls. No library needed.
-// The API key is kept in the app's private storage.
+// The API key and model name are kept in the app's private storage.
 object GroqClient {
 
+    /** Used until the user types another model name. Groq retires models from time to time. */
+    const val DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
     private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-    private const val MODEL = "llama-3.3-70b-versatile"
     private const val SYSTEM_PROMPT =
         "You are LilyAi, a concise assistant inside a phone game helper app. " +
             "You can run tools to launch games and control Auto mode. " +
@@ -25,6 +27,7 @@ object GroqClient {
     private const val TOOL_TIMEOUT_SECONDS = 10L
     private const val PREFS = "ai"
     private const val KEY_API = "groq_key"
+    private const val KEY_MODEL = "groq_model"
 
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -36,25 +39,39 @@ object GroqClient {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_API, key).apply()
     }
 
+    fun savedModel(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MODEL, DEFAULT_MODEL)
+            .orEmpty()
+            .ifBlank { DEFAULT_MODEL }
+
+    fun saveModel(context: Context, model: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MODEL, model.trim().ifEmpty { DEFAULT_MODEL })
+            .apply()
+    }
+
     /**
      * Sends one question after the earlier [history]. The model may call tools from [tools]
      * before it answers. onResult runs on the main thread with the reply or the error.
      */
     fun ask(
         apiKey: String,
+        model: String,
         prompt: String,
         history: List<ChatMessage>,
         tools: ToolRegistry,
         onResult: (Result<String>) -> Unit
     ) {
         executor.execute {
-            val result = runCatching { request(apiKey, prompt, history, tools) }
+            val result = runCatching { request(apiKey, model, prompt, history, tools) }
             mainHandler.post { onResult(result) }
         }
     }
 
     private fun request(
         apiKey: String,
+        model: String,
         prompt: String,
         history: List<ChatMessage>,
         tools: ToolRegistry
@@ -66,7 +83,7 @@ object GroqClient {
         messages.put(JSONObject().put("role", "user").put("content", prompt))
 
         repeat(MAX_TOOL_ROUNDS) {
-            val reply = send(apiKey, messages, tools)
+            val reply = send(apiKey, model, messages, tools)
             val content = if (reply.isNull("content")) "" else reply.getString("content")
             val calls = reply.optJSONArray("tool_calls")
             if (calls == null || calls.length() == 0) return content.ifBlank { "(no answer)" }
@@ -102,9 +119,9 @@ object GroqClient {
             .getOrElse { "Error: the tool took too long" }
     }
 
-    private fun send(apiKey: String, messages: JSONArray, tools: ToolRegistry): JSONObject {
+    private fun send(apiKey: String, model: String, messages: JSONArray, tools: ToolRegistry): JSONObject {
         val body = JSONObject()
-            .put("model", MODEL)
+            .put("model", model)
             .put("messages", messages)
             .put("tools", tools.definitions())
 
