@@ -111,7 +111,12 @@ class GameOverlayService : Service() {
             readText.visibility = state
             auto.visibility = state
             stop.visibility = state
-            if (!visible) output.visibility = View.GONE
+            if (visible) {
+                // Auto can also be started or stopped by the assistant, so show the real state.
+                auto.text = if (AutoPlayer.running) AUTO_ON else AUTO_OFF
+            } else {
+                output.visibility = View.GONE
+            }
         }
 
         // Starting Auto folds the menu away so only the small handle stays on screen.

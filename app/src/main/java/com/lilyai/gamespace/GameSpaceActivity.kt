@@ -20,6 +20,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.ai.GroqClient
+import com.lilyai.ai.ToolRegistry
 import com.lilyai.autoplay.AutoPlayer
 import com.lilyai.autoplay.ScreenActions
 import com.lilyai.capture.ScreenshotManager
@@ -35,6 +36,7 @@ class GameSpaceActivity : Activity() {
     private lateinit var repository: GameRepository
     private lateinit var detector: GameDetector
     private var games: List<AppEntry> = emptyList()
+    private val tools by lazy { ToolRegistry(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,7 +70,7 @@ class GameSpaceActivity : Activity() {
             setText(GroqClient.savedKey(this@GameSpaceActivity))
         }
         val question = EditText(this).apply {
-            hint = "Ask LilyAi something"
+            hint = "Ask LilyAi, or tell it to launch a game or start Auto"
         }
         val answer = TextView(this).apply { setTextIsSelectable(true) }
         val ask = Button(this).apply {
@@ -207,9 +209,13 @@ class GameSpaceActivity : Activity() {
             toast("Type a question first")
             return
         }
+        // Save the words as typed so the assistant sees and changes the current ones.
+        AutoPlayer.saveTargets(this, autoWords.text.toString())
         answer.text = "Thinking..."
-        GroqClient.ask(key, question) { result ->
+        GroqClient.ask(key, question, tools) { result ->
             answer.text = result.fold({ it }, { "Failed: ${it.message}" })
+            // The assistant may have changed the Auto words.
+            autoWords.setText(AutoPlayer.rawTargets(this))
         }
     }
 
