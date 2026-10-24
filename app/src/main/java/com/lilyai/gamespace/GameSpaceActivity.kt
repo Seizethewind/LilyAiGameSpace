@@ -64,9 +64,10 @@ class GameSpaceActivity : Activity() {
             text = "Show overlay"
             setOnClickListener { showOverlay(askPermission = true) }
         }
-        // Words for the overlay's Auto mode, in priority order. Saved when you leave this screen.
+        // Default words for Auto mode, used when a game has no words of its own.
+        // Use Teach on the overlay to save words for one game. Saved when you leave this screen.
         autoWords = EditText(this).apply {
-            hint = "Auto mode words, for example Next, OK, Skip"
+            hint = "Default Auto words, for example Next, OK, Skip"
             setSingleLine()
             setText(AutoPlayer.rawTargets(this@GameSpaceActivity))
         }
@@ -250,7 +251,7 @@ class GameSpaceActivity : Activity() {
                 questionBox.setText("")
             }
             answer.text = result.fold({ it }, { "Failed: ${it.message}" })
-            // The assistant may have changed the Auto words.
+            // The assistant may have changed the default Auto words.
             autoWords.setText(AutoPlayer.rawTargets(this))
         }
     }

@@ -5,19 +5,29 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
+import com.lilyai.gamespace.GameRepository
 
 class LilyAccessibilityService : AccessibilityService() {
+
+    private val repository by lazy { GameRepository(this) }
 
     override fun onServiceConnected() {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    // Remember which library game was last on screen. Teach and Auto use that game's words.
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val windowEvent = event ?: return
+        if (windowEvent.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val packageName = windowEvent.packageName?.toString() ?: return
+        if (packageName in repository.packages()) foregroundGame = packageName
+    }
 
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
+        foregroundGame = null
         return super.onUnbind(intent)
     }
 
@@ -44,6 +54,11 @@ class LilyAccessibilityService : AccessibilityService() {
         // Set while the user has the service turned on in Android settings.
         @Volatile
         var instance: LilyAccessibilityService? = null
+            private set
+
+        // The library game that was last on screen, or null if none has been seen yet.
+        @Volatile
+        var foregroundGame: String? = null
             private set
     }
 }
