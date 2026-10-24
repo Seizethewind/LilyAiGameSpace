@@ -35,6 +35,7 @@ class GameSpaceActivity : Activity() {
     private lateinit var list: ListView
     private lateinit var repository: GameRepository
     private lateinit var detector: GameDetector
+    private lateinit var playtime: PlaytimeTracker
     private var games: List<AppEntry> = emptyList()
     private val tools by lazy { ToolRegistry(applicationContext) }
 
@@ -42,11 +43,16 @@ class GameSpaceActivity : Activity() {
         super.onCreate(savedInstanceState)
         repository = GameRepository(this)
         detector = GameDetector(packageManager)
+        playtime = PlaytimeTracker(this)
 
         status = TextView(this).apply { textSize = 16f }
         val openSettings = Button(this).apply {
             text = "Open accessibility settings"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        }
+        val usageAccess = Button(this).apply {
+            text = "Allow usage access (for playtime)"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
         }
         val screenshot = Button(this).apply {
             text = "Screenshot in 5 seconds"
@@ -125,6 +131,7 @@ class GameSpaceActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(status)
             addView(openSettings)
+            addView(usageAccess)
             addView(screenshot)
             addView(overlay)
             addView(autoWords)
@@ -165,10 +172,15 @@ class GameSpaceActivity : Activity() {
         GroqClient.saveKey(this, apiKey.text.toString().trim())
     }
 
+    // Each game shows today's minutes once usage access is allowed.
     private fun refreshList() {
         val saved = repository.packages()
         games = detector.installedApps().filter { it.packageName in saved }
-        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, games.map { it.name })
+        val minutes = if (playtime.hasAccess()) playtime.minutesToday() else null
+        val labels = games.map { game ->
+            if (minutes == null) game.name else "${game.name} - ${minutes[game.packageName] ?: 0} min today"
+        }
+        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
     }
 
     private fun showAddDialog() {

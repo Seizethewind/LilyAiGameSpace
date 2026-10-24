@@ -10,6 +10,7 @@ import com.lilyai.gamespace.AppEntry
 import com.lilyai.gamespace.GameDetector
 import com.lilyai.gamespace.GameLauncher
 import com.lilyai.gamespace.GameRepository
+import com.lilyai.gamespace.PlaytimeTracker
 import com.lilyai.overlay.GameOverlayService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,6 +33,13 @@ class ToolRegistry(private val context: Context) {
         )
         .put(
             tool(
+                "get_playtime",
+                "How many minutes each library game was played.",
+                "period" to "today or week"
+            )
+        )
+        .put(
+            tool(
                 "set_auto_words",
                 "Set the words Auto mode looks for on screen and taps, in priority order.",
                 "words" to "Comma-separated words, for example Next, OK, Skip"
@@ -44,6 +52,7 @@ class ToolRegistry(private val context: Context) {
     fun execute(name: String, args: JSONObject): String = when (name) {
         "list_games" -> listGames()
         "launch_game" -> launchGame(args.optString("name"))
+        "get_playtime" -> playtime(args.optString("period"))
         "set_auto_words" -> setAutoWords(args.optString("words"))
         "start_auto" -> startAuto()
         "stop_auto" -> {
@@ -76,6 +85,21 @@ class ToolRegistry(private val context: Context) {
                     "Could not launch ${game.name}"
                 }
             }
+        }
+    }
+
+    private fun playtime(period: String): String {
+        val tracker = PlaytimeTracker(context)
+        if (!tracker.hasAccess()) {
+            return "Usage access is not allowed. The user must allow it for LilyAi in Android settings first"
+        }
+        val games = libraryGames()
+        if (games.isEmpty()) return "The library is empty"
+        val week = period.contains("week", ignoreCase = true)
+        val minutes = if (week) tracker.minutesLast7Days() else tracker.minutesToday()
+        val label = if (week) "last 7 days" else "today"
+        return "Playtime ($label): " + games.joinToString(", ") {
+            "${it.name} ${minutes[it.packageName] ?: 0} min"
         }
     }
 
