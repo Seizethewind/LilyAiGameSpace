@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.IBinder
 import android.provider.Settings
@@ -14,12 +15,14 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenshotManager
 import kotlin.math.abs
 
-// A small draggable button over other apps. Tap it to show Screenshot and Stop.
+// A small draggable button over other apps. Tap it to show Screenshot, Read text and Stop.
 // Runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
@@ -60,10 +63,26 @@ class GameOverlayService : Service() {
         windowManager = getSystemService(WindowManager::class.java)
 
         val handle = Button(this).apply { text = "L" }
+        // Shows the text found on screen. Tap it to hide it.
+        val output = TextView(this).apply {
+            visibility = View.GONE
+            textSize = 12f
+            maxLines = 12
+            maxWidth = 700
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(16, 16, 16, 16)
+            setOnClickListener { visibility = View.GONE }
+        }
         val screenshot = Button(this).apply {
             text = "Screenshot"
             visibility = View.GONE
             setOnClickListener { takeScreenshot() }
+        }
+        val readText = Button(this).apply {
+            text = "Read text"
+            visibility = View.GONE
+            setOnClickListener { readScreen(output) }
         }
         val stop = Button(this).apply {
             text = "Stop"
@@ -74,7 +93,9 @@ class GameOverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             addView(handle)
             addView(screenshot)
+            addView(readText)
             addView(stop)
+            addView(output)
         }
 
         params = WindowManager.LayoutParams(
@@ -92,7 +113,9 @@ class GameOverlayService : Service() {
         handle.setOnTouchListener(dragAndTap(panel) {
             val show = if (screenshot.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             screenshot.visibility = show
+            readText.visibility = show
             stop.visibility = show
+            if (show == View.GONE) output.visibility = View.GONE
         })
 
         windowManager.addView(panel, params)
@@ -145,6 +168,36 @@ class GameOverlayService : Service() {
             ScreenshotManager.capture(service) { result ->
                 panel.visibility = View.VISIBLE
                 toast(result.fold({ "Screenshot saved" }, { "Failed: ${it.message}" }))
+            }
+        }, 400)
+    }
+
+    // Takes a screenshot, reads the text on it and shows the lines in the overlay.
+    private fun readScreen(output: TextView) {
+        val service = LilyAccessibilityService.instance
+        val panel = root
+        if (service == null || panel == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        output.visibility = View.GONE
+        panel.visibility = View.INVISIBLE
+        panel.postDelayed({
+            ScreenshotManager.captureBitmap(service) { captured ->
+                panel.visibility = View.VISIBLE
+                captured.onSuccess { bitmap ->
+                    ScreenReader.read(bitmap) { outcome ->
+                        bitmap.recycle()
+                        outcome.onSuccess { lines ->
+                            output.text = if (lines.isEmpty()) {
+                                "No text found"
+                            } else {
+                                lines.joinToString("\n") { it.text }
+                            }
+                            output.visibility = View.VISIBLE
+                        }.onFailure { toast("Failed: ${it.message}") }
+                    }
+                }.onFailure { toast("Failed: ${it.message}") }
             }
         }, 400)
     }
