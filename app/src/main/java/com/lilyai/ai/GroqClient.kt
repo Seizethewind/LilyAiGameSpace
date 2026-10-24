@@ -1,7 +1,5 @@
 package com.lilyai.ai
 
-import android.content.Context
-import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONArray
@@ -13,7 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 // Talks to Groq's OpenAI-compatible chat endpoint, including tool calls. No library needed.
-// The API key is stored encrypted (see KeyVault). The model name is plain text.
+// Keys and the model name come from ProviderSettings.
 object GroqClient {
 
     /** Used until the user types another model name. Groq retires models from time to time. */
@@ -26,54 +24,21 @@ object GroqClient {
             "Use a tool only when the user asks for that action, then tell the user what happened."
     private const val MAX_TOOL_ROUNDS = 4
     private const val TOOL_TIMEOUT_SECONDS = 10L
-    private const val PREFS = "ai"
-
-    // Older versions kept the key as plain text under this name. It is only read to move it.
-    private const val KEY_API_PLAIN = "groq_key"
-    private const val KEY_API_ENCRYPTED = "groq_key_enc"
-    private const val KEY_MODEL = "groq_model"
 
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** The saved key, or an empty text if there is none (or it can no longer be decrypted). */
-    fun savedKey(context: Context): String {
-        val prefs = prefs(context)
-        prefs.getString(KEY_API_ENCRYPTED, null)?.let { return KeyVault.decrypt(it).orEmpty() }
-
-        // First run after the update: encrypt the old plain-text key once, then remove it.
-        val legacy = prefs.getString(KEY_API_PLAIN, "").orEmpty()
-        if (legacy.isNotEmpty()) runCatching { saveKey(context, legacy) }
-        return legacy
-    }
-
-    /** Saves the key encrypted. An empty text removes it. */
-    fun saveKey(context: Context, key: String) {
-        val editor = prefs(context).edit().remove(KEY_API_PLAIN)
-        if (key.isBlank()) {
-            editor.remove(KEY_API_ENCRYPTED)
-        } else {
-            editor.putString(KEY_API_ENCRYPTED, KeyVault.encrypt(key.trim()))
-        }
-        editor.apply()
-    }
-
-    fun savedModel(context: Context): String =
-        prefs(context).getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
-
-    fun saveModel(context: Context, model: String) {
-        prefs(context).edit().putString(KEY_MODEL, model.trim().ifEmpty { DEFAULT_MODEL }).apply()
-    }
-
-    private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    // A failed request with the status code, so a rejected key can be told from other errors.
+    private class GroqHttpException(val code: Int, message: String) : Exception(message)
 
     /**
      * Sends one question after the earlier [history]. The model may call tools from [tools]
-     * before it answers. onResult runs on the main thread with the reply or the error.
+     * before it answers. [keys] is the list from ProviderSettings.takeTurn: the first key is
+     * used, and the next ones only if a key is rejected (401) or rate limited (429).
+     * onResult runs on the main thread with the reply or the error.
      */
     fun ask(
-        apiKey: String,
+        keys: List<String>,
         model: String,
         prompt: String,
         history: List<ChatMessage>,
@@ -81,13 +46,13 @@ object GroqClient {
         onResult: (Result<String>) -> Unit
     ) {
         executor.execute {
-            val result = runCatching { request(apiKey, model, prompt, history, tools) }
+            val result = runCatching { request(keys, model, prompt, history, tools) }
             mainHandler.post { onResult(result) }
         }
     }
 
     private fun request(
-        apiKey: String,
+        keys: List<String>,
         model: String,
         prompt: String,
         history: List<ChatMessage>,
@@ -99,8 +64,11 @@ object GroqClient {
         }
         messages.put(JSONObject().put("role", "user").put("content", prompt))
 
+        // Once a key works, the later steps of this question keep using it.
+        var keyIndex = 0
         repeat(MAX_TOOL_ROUNDS) {
-            val reply = send(apiKey, model, messages, tools)
+            val (reply, usedIndex) = sendWithFailover(keys, keyIndex, model, messages, tools)
+            keyIndex = usedIndex
             val content = if (reply.isNull("content")) "" else reply.getString("content")
             val calls = reply.optJSONArray("tool_calls")
             if (calls == null || calls.length() == 0) return content.ifBlank { "(no answer)" }
@@ -121,6 +89,32 @@ object GroqClient {
             }
         }
         error("The assistant used too many tool steps")
+    }
+
+    // Tries the key at [from], then the following ones if a key is rejected or rate limited.
+    // Returns the reply and the position of the key that worked.
+    private fun sendWithFailover(
+        keys: List<String>,
+        from: Int,
+        model: String,
+        messages: JSONArray,
+        tools: ToolRegistry
+    ): Pair<JSONObject, Int> {
+        var lastError: GroqHttpException? = null
+        for (offset in keys.indices) {
+            val index = (from + offset) % keys.size
+            try {
+                return send(keys[index], model, messages, tools) to index
+            } catch (e: GroqHttpException) {
+                if (e.code != 401 && e.code != 429) throw e
+                lastError = e
+            }
+        }
+        throw if (keys.size > 1) {
+            IllegalStateException("All ${keys.size} keys failed. Last error: ${lastError?.message}")
+        } else {
+            lastError ?: IllegalStateException("No API key available")
+        }
     }
 
     // Tools touch Android (activities, services), so they run on the main thread.
@@ -155,7 +149,7 @@ object GroqClient {
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) error("Groq error $code: ${errorMessage(text)}")
+            if (code !in 200..299) throw GroqHttpException(code, "Groq error $code: ${errorMessage(text)}")
             return JSONObject(text)
                 .getJSONArray("choices")
                 .getJSONObject(0)
