@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -18,16 +19,18 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.ai.GroqClient
 import com.lilyai.autoplay.AutoPlayer
 import com.lilyai.autoplay.ScreenActions
 import com.lilyai.capture.ScreenshotManager
 import com.lilyai.overlay.GameOverlayService
 
-// Game library (tap to launch, long-press to remove) plus the overlay, Auto words and test controls.
+// Game library (tap to launch, long-press to remove) plus the overlay, Auto words, Ask LilyAi and test controls.
 class GameSpaceActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var autoWords: EditText
+    private lateinit var apiKey: EditText
     private lateinit var list: ListView
     private lateinit var repository: GameRepository
     private lateinit var detector: GameDetector
@@ -56,6 +59,21 @@ class GameSpaceActivity : Activity() {
             hint = "Auto mode words, for example Next, OK, Skip"
             setSingleLine()
             setText(AutoPlayer.rawTargets(this@GameSpaceActivity))
+        }
+        // Ask LilyAi: a question goes to Groq with your key. Saved when you leave this screen.
+        apiKey = EditText(this).apply {
+            hint = "Groq API key"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine()
+            setText(GroqClient.savedKey(this@GameSpaceActivity))
+        }
+        val question = EditText(this).apply {
+            hint = "Ask LilyAi something"
+        }
+        val answer = TextView(this).apply { setTextIsSelectable(true) }
+        val ask = Button(this).apply {
+            text = "Ask LilyAi"
+            setOnClickListener { askLily(question.text.toString().trim(), answer) }
         }
         // Tap test: the target counts real touches. The second button taps it through
         // the accessibility service, so the count going up proves gestures work.
@@ -108,6 +126,10 @@ class GameSpaceActivity : Activity() {
             addView(screenshot)
             addView(overlay)
             addView(autoWords)
+            addView(apiKey)
+            addView(question)
+            addView(ask)
+            addView(answer)
             addView(tapTarget)
             addView(autoTap)
             addView(tapQuery)
@@ -138,6 +160,7 @@ class GameSpaceActivity : Activity() {
     override fun onPause() {
         super.onPause()
         AutoPlayer.saveTargets(this, autoWords.text.toString())
+        GroqClient.saveKey(this, apiKey.text.toString().trim())
     }
 
     private fun refreshList() {
@@ -172,6 +195,22 @@ class GameSpaceActivity : Activity() {
             return
         }
         startForegroundService(Intent(this, GameOverlayService::class.java))
+    }
+
+    private fun askLily(question: String, answer: TextView) {
+        val key = apiKey.text.toString().trim()
+        if (key.isEmpty()) {
+            toast("Paste your Groq API key first")
+            return
+        }
+        if (question.isEmpty()) {
+            toast("Type a question first")
+            return
+        }
+        answer.text = "Thinking..."
+        GroqClient.ask(key, question) { result ->
+            answer.text = result.fold({ it }, { "Failed: ${it.message}" })
+        }
     }
 
     // Taps the middle of the target button through the accessibility service, one tap at a time.
