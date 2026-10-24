@@ -1,25 +1,34 @@
 package com.lilyai.gamespace
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.capture.ScreenshotManager
 
-// Phase 1 proof screen: turn on the accessibility service and take a screenshot.
+// Game library (tap to launch, long-press to remove) plus the Phase 1 screenshot proof.
 class GameSpaceActivity : Activity() {
 
     private lateinit var status: TextView
+    private lateinit var list: ListView
+    private lateinit var repository: GameRepository
+    private lateinit var detector: GameDetector
+    private var games: List<AppEntry> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        repository = GameRepository(this)
+        detector = GameDetector(packageManager)
 
         status = TextView(this).apply { textSize = 16f }
         val openSettings = Button(this).apply {
@@ -30,6 +39,23 @@ class GameSpaceActivity : Activity() {
             text = "Screenshot in 5 seconds"
             setOnClickListener { screenshotAfterDelay() }
         }
+        val addGame = Button(this).apply {
+            text = "Add game"
+            setOnClickListener { showAddDialog() }
+        }
+        list = ListView(this).apply {
+            setOnItemClickListener { _, _, position, _ ->
+                val game = games[position]
+                if (!GameLauncher.launch(this@GameSpaceActivity, game.packageName)) {
+                    toast("Cannot launch ${game.name}")
+                }
+            }
+            setOnItemLongClickListener { _, _, position, _ ->
+                repository.remove(games[position].packageName)
+                refreshList()
+                true
+            }
+        }
 
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -37,6 +63,8 @@ class GameSpaceActivity : Activity() {
             addView(status)
             addView(openSettings)
             addView(screenshot)
+            addView(addGame)
+            addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
     }
 
@@ -47,6 +75,28 @@ class GameSpaceActivity : Activity() {
         } else {
             "Accessibility service: OFF"
         }
+        refreshList()
+    }
+
+    private fun refreshList() {
+        val saved = repository.packages()
+        games = detector.installedApps().filter { it.packageName in saved }
+        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, games.map { it.name })
+    }
+
+    private fun showAddDialog() {
+        val saved = repository.packages()
+        // Apps that declare the game category come first.
+        val candidates = detector.installedApps()
+            .filter { it.packageName !in saved }
+            .sortedByDescending { it.likelyGame }
+        AlertDialog.Builder(this)
+            .setTitle("Add game")
+            .setItems(candidates.map { it.name }.toTypedArray()) { _, index ->
+                repository.add(candidates[index].packageName)
+                refreshList()
+            }
+            .show()
     }
 
     // The delay gives you time to switch to a game before the capture.
