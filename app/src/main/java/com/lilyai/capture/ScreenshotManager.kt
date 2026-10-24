@@ -12,14 +12,14 @@ import java.util.Locale
 
 object ScreenshotManager {
 
-    /** Takes a screenshot through the accessibility service and saves it to Pictures/LilyAi. */
-    fun capture(service: AccessibilityService, onResult: (Result<Uri>) -> Unit) {
+    /** Takes a screenshot through the accessibility service. The caller recycles the bitmap. */
+    fun captureBitmap(service: AccessibilityService, onResult: (Result<Bitmap>) -> Unit) {
         service.takeScreenshot(
             Display.DEFAULT_DISPLAY,
             service.mainExecutor,
             object : AccessibilityService.TakeScreenshotCallback {
                 override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
-                    onResult(runCatching { save(service, screenshot) })
+                    onResult(runCatching { toBitmap(screenshot) })
                 }
 
                 override fun onFailure(errorCode: Int) {
@@ -29,7 +29,14 @@ object ScreenshotManager {
         )
     }
 
-    private fun save(service: AccessibilityService, screenshot: AccessibilityService.ScreenshotResult): Uri {
+    /** Takes a screenshot and saves it to Pictures/LilyAi. */
+    fun capture(service: AccessibilityService, onResult: (Result<Uri>) -> Unit) {
+        captureBitmap(service) { result ->
+            onResult(result.mapCatching { save(service, it) })
+        }
+    }
+
+    private fun toBitmap(screenshot: AccessibilityService.ScreenshotResult): Bitmap {
         val buffer = screenshot.hardwareBuffer
         try {
             val hardware = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
@@ -37,7 +44,14 @@ object ScreenshotManager {
             val bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false)
                 ?: error("Could not copy the screenshot")
             hardware.recycle()
+            return bitmap
+        } finally {
+            buffer.close()
+        }
+    }
 
+    private fun save(service: AccessibilityService, bitmap: Bitmap): Uri {
+        try {
             // MediaStore, because Android 11 enforces scoped storage.
             val name = "LilyAi_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
             val values = ContentValues().apply {
@@ -52,14 +66,13 @@ object ScreenshotManager {
             val written = resolver.openOutputStream(uri)?.use {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             } ?: false
-            bitmap.recycle()
             if (!written) {
                 resolver.delete(uri, null, null)
                 error("Could not write the screenshot")
             }
             return uri
         } finally {
-            buffer.close()
+            bitmap.recycle()
         }
     }
 }

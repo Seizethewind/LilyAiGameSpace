@@ -25,3 +25,9 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    // On-device text recognition (Latin script). The model ships inside the APK and
+    // runs offline.
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+}
