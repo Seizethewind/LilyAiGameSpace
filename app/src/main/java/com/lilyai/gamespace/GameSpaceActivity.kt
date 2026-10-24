@@ -33,6 +33,7 @@ class GameSpaceActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var autoWords: EditText
     private lateinit var apiKey: EditText
+    private lateinit var modelName: EditText
     private lateinit var list: ListView
     private lateinit var repository: GameRepository
     private lateinit var detector: GameDetector
@@ -75,6 +76,12 @@ class GameSpaceActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine()
             setText(GroqClient.savedKey(this@GameSpaceActivity))
+        }
+        // If Groq retires the model, type the name of another one here. No rebuild needed.
+        modelName = EditText(this).apply {
+            hint = "Groq model name"
+            setSingleLine()
+            setText(GroqClient.savedModel(this@GameSpaceActivity))
         }
         val question = EditText(this).apply {
             hint = "Ask LilyAi, or tell it to launch a game or start Auto"
@@ -144,6 +151,7 @@ class GameSpaceActivity : Activity() {
             addView(overlay)
             addView(autoWords)
             addView(apiKey)
+            addView(modelName)
             addView(question)
             addView(ask)
             addView(newChat)
@@ -179,6 +187,7 @@ class GameSpaceActivity : Activity() {
         super.onPause()
         AutoPlayer.saveTargets(this, autoWords.text.toString())
         GroqClient.saveKey(this, apiKey.text.toString().trim())
+        GroqClient.saveModel(this, modelName.text.toString())
     }
 
     // Each game shows today's minutes once usage access is allowed.
@@ -222,6 +231,7 @@ class GameSpaceActivity : Activity() {
 
     private fun askLily(questionBox: EditText, answer: TextView) {
         val key = apiKey.text.toString().trim()
+        val model = modelName.text.toString().trim().ifEmpty { GroqClient.DEFAULT_MODEL }
         val question = questionBox.text.toString().trim()
         if (key.isEmpty()) {
             toast("Paste your Groq API key first")
@@ -234,7 +244,7 @@ class GameSpaceActivity : Activity() {
         // Save the words as typed so the assistant sees and changes the current ones.
         AutoPlayer.saveTargets(this, autoWords.text.toString())
         answer.text = "Thinking..."
-        GroqClient.ask(key, question, ConversationManager.history(), tools) { result ->
+        GroqClient.ask(key, model, question, ConversationManager.history(), tools) { result ->
             result.onSuccess { reply ->
                 ConversationManager.addExchange(question, reply)
                 questionBox.setText("")
