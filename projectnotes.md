@@ -1,18 +1,26 @@
 # LilyAi --- Implementation Project Notes
 
 > **Project:** LilyAi\
-> **Platform:** Native Android\
+> **Platform:** Native Android (target phone: Android 11, API 30, so
+> minSdk 30)\
 > **Primary language:** Kotlin\
-> **Build:** Gradle + GitHub Actions\
+> **Build:** Gradle + GitHub Actions (development is phone-only, so
+> builds run in GitHub Actions)\
 > **Cloud database:** Turso\
-> **AI providers:** Qwen3-4B (main) + Groq (backup) + additional model
-> providers\
+> **AI providers:** Qwen3-4B (main, runs on the device) + Groq (backup) +
+> additional model providers\
 > **Core concept:** Native Android AI assistant with a Game Space
 > subsystem and phone-control capabilities.
 
 ------------------------------------------------------------------------
 
 ## 1. Project Vision
+
+**Primary goal:** game assistance and autoplay. AI is the main feature.
+The Game Space functions were added as a replica base because of their
+performance features. The target games are light games: chess, Miscrits
+World Adventure and Umamusume. (Mobile Legends in the examples below is
+only an example.)
 
 LilyAi is a native Android AI assistant that can:
 
@@ -30,6 +38,8 @@ LilyAi is a native Android AI assistant that can:
     synchronization.
 8.  Continue functioning offline for features that do not require cloud
     AI.
+9.  Play supported games automatically (autoplay) through user-started
+    automation using the accessibility service.
 
 ### Core principle
 
@@ -258,6 +268,11 @@ Features:
 -   Track game sessions.
 -   Open game-specific settings.
 
+On Android 11, other apps are hidden from the app by default. Scanning
+installed apps needs the QUERY_ALL_PACKAGES permission or a `<queries>`
+list of game packages. A manual add list is the reliable fallback,
+because Android has no flag that says an app is a game.
+
 Suggested model:
 
 ``` text
@@ -473,6 +488,10 @@ Do not attempt to bypass Android restrictions.
 
 # 10. Performance Management
 
+The target games are light, so performance management is low priority.
+The battery and temperature readout in the overlay is the part worth
+keeping.
+
 Provide a unified abstraction:
 
 ``` text
@@ -502,6 +521,10 @@ A normal third-party APK cannot generally:
 -   Change thermal governors.
 -   Control OEM cooling hardware.
 -   Force OEM performance engines.
+
+Android Game Mode APIs start at Android 12. The target phone runs
+Android 11, so Game Mode is unavailable there and must be reported as
+unavailable.
 
 The application must detect device capabilities.
 
@@ -592,6 +615,12 @@ Saved media
 
 Use the appropriate Android API/permission flow for the target Android
 version.
+
+On Android 11 the first choice is
+`AccessibilityService.takeScreenshot()` (API 30+). It needs the service
+to declare `canTakeScreenshot`, has a short minimum interval between
+calls, and returns a blank image for secure windows. Saved screenshots
+go through MediaStore because Android 11 enforces scoped storage.
 
 ------------------------------------------------------------------------
 
@@ -867,8 +896,7 @@ Notes:
 
 -   Qwen3-4B is a text model. Screen understanding needs a separate
     vision provider.
--   Where Qwen3-4B runs (on the device or on a hosted endpoint) is not
-    decided yet. See 20.4.
+-   Qwen3-4B runs on the device. See 20.4.
 
 ## 20.2 Groq Provider (backup)
 
@@ -889,6 +917,8 @@ Never hard-code secrets in the APK.
 Do not ship a permanent privileged API key inside the application.
 
 Use a secure backend/token strategy appropriate to the deployment model.
+
+(Current state: the Groq key is stored in the app. See section 30.)
 
 ## 20.3 Failover Policy
 
@@ -922,16 +952,20 @@ Rules:
 -   If both fail, tell the user the AI is unavailable. Game Space keeps
     working.
 
-## 20.4 Open Decision
+## 20.4 Decision
 
-Where Qwen3-4B runs:
+Qwen3-4B runs on the device. The target phone has 8 GB of RAM (plus 3
+GB of virtual RAM, which is swap and does not count for the model), so
+a 4-bit quantized 4B model fits next to a light game.
 
--   On the device: works offline and keeps data private, but uses RAM
-    and battery while gaming.
--   Hosted endpoint: lighter on the phone, but needs internet and the
-    same secret handling as Groq.
+To measure on the target phone:
 
-To be decided.
+-   Generation speed (depends on the chip, not the RAM).
+-   Heat and battery use while a game is open.
+-   Whether Android keeps the model process alive in the background.
+
+Groq stays the backup for when the local model is unavailable or too
+slow.
 
 ------------------------------------------------------------------------
 
@@ -1078,6 +1112,28 @@ Possible future features:
 
 AI screen analysis must respect user consent and Android capture
 restrictions.
+
+## 23.1 Capture and recognition order
+
+Capture:
+
+1.  `AccessibilityService.takeScreenshot()` (API 30+) for on-demand
+    captures. No per-session capture prompt. The same service also does
+    taps and swipes for autoplay.
+2.  MediaProjection for recording and continuous capture.
+
+Games draw to a canvas, so the accessibility node tree gives almost
+nothing for them. Screens must be recognized from the image.
+
+Recognition, cheapest first:
+
+1.  On-device OCR (for example ML Kit text recognition) and template
+    matching for known screens and buttons.
+2.  A vision model only for open questions. Qwen3-4B is text-only, so
+    this is a separate hosted or on-device vision model. Downscale the
+    screenshot before sending it.
+
+Capture only when the user asks or when an autoplay task is running.
 
 ------------------------------------------------------------------------
 
@@ -1376,8 +1432,10 @@ The exact production credential architecture should be chosen based on
 whether LilyAi is a personal/private app, distributed APK, or public
 application.
 
-If Qwen3-4B runs on a hosted endpoint, the same rule applies to its
-credentials.
+Current state: the owner stores the keys in the app itself. How they
+are stored and whether to change this is still to be decided. The text
+above describes the safer alternatives. Qwen3-4B runs on the device and
+needs no key.
 
 ## Android permissions
 
@@ -1445,15 +1503,17 @@ Never pretend unavailable OEM features are working.
 
 # 32. Accessibility Architecture
 
-Accessibility should be an optional capability, not a dependency for
-basic Game Space functionality.
+The accessibility service is a core capability. It provides screenshots
+(`takeScreenshot`, API 30+) and the taps and swipes that autoplay needs.
+Basic Game Space functions (library, launch, timer) must still work
+without it.
 
-Potential uses:
+Uses:
 
+-   Screenshot capture.
+-   Autoplay gestures (tap, swipe) in supported games.
 -   Reading visible UI where permitted.
--   User-requested automation.
 -   Navigation assistance.
--   Accessibility actions.
 
 Architecture:
 
@@ -1469,8 +1529,16 @@ ToolRegistry
 
 Every action should be explicitly validated.
 
-Do not build unrestricted autonomous control that could unexpectedly
-manipulate the device.
+Autoplay must be started by the user, stoppable at any time, and
+limited to the target game. Do not build unrestricted autonomous
+control that could unexpectedly manipulate the device.
+
+Declare only the accessibility capabilities a feature needs. The
+gesture capability is added when autoplay is built.
+
+Note: some game publishers prohibit automation and can ban accounts for
+it. Online chess against real people with engine help is cheating. Pick
+target games and modes with that in mind.
 
 ------------------------------------------------------------------------
 
@@ -1555,7 +1623,9 @@ Game
 Build:
 
 -   Kotlin/Android project.
--   Gradle setup.
+-   Gradle setup (minSdk 30).
+-   GitHub Actions debug APK build.
+-   Accessibility service with a screenshot proof.
 -   Navigation.
 -   Permission manager.
 -   Capability manager.
@@ -1595,15 +1665,16 @@ Build:
 -   Call-related behavior where supported.
 -   Brightness profile.
 -   Rotation profile.
--   Game Mode integration.
 -   Capability-aware performance controls.
+
+(Game Mode integration is dropped: it needs Android 12+.)
 
 ## Phase 5 --- AI Core
 
 Build:
 
 -   AiProvider interface.
--   Qwen3-4B provider (main).
+-   Qwen3-4B provider (main, on-device).
 -   Groq provider (backup).
 -   Model router with failover from Qwen3-4B to Groq.
 -   Conversation manager.
@@ -1630,6 +1701,17 @@ Add:
 -   Vision model.
 -   Screen analysis.
 -   User-requested game assistance.
+
+## Phase 7b --- Autoplay
+
+Add:
+
+-   Gesture capability in the accessibility service (tap, swipe).
+-   Screen recognition (OCR, template matching).
+-   Scripted flows per game (chess, Miscrits World Adventure,
+    Umamusume).
+-   Start/stop control from the overlay.
+-   AI decisions for choices a script cannot make.
 
 ## Phase 8 --- Turso
 
@@ -1911,7 +1993,8 @@ The final architecture should be understood as:
 14. **Respect Android permission and security boundaries.**
 15. **Game Space should remain functional if AI/cloud services fail.**
 16. **AI features should degrade gracefully when offline.**
-17. **Do not put long-lived API secrets inside the APK.**
+17. **Do not put long-lived API secrets inside the APK (current state:
+    keys are stored in the app, see section 30).**
 18. **Use GitHub Actions for repeatable builds and releases.**
 19. **Test across Android versions and OEM devices.**
 20. **Treat the overlay and AI tool system as first-class LilyAi
@@ -1953,6 +2036,13 @@ The first usable LilyAi release should contain:
 -   [ ] Model router
 -   [ ] Tool registry
 -   [ ] Basic tool calling
+
+### Autoplay
+
+-   [ ] Accessibility service (screenshot and gestures)
+-   [ ] Screen recognition (OCR, template matching)
+-   [ ] One scripted flow for one game
+-   [ ] Start/stop control
 
 ### Storage
 
@@ -2002,9 +2092,10 @@ After the MVP:
 It is:
 
 > **A native Android AI assistant that combines Game Space
-> functionality, a persistent AI overlay, controlled Android automation,
-> multi-model AI inference with Qwen3-4B as the main model and Groq as
-> the backup, and Turso-backed cloud memory/state.**
+> functionality, a persistent AI overlay, controlled Android automation
+> (including game autoplay), multi-model AI inference with Qwen3-4B as
+> the main model and Groq as the backup, and Turso-backed cloud
+> memory/state.**
 
 The fundamental relationship is:
 
