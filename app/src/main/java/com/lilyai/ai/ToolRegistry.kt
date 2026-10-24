@@ -41,7 +41,8 @@ class ToolRegistry(private val context: Context) {
         .put(
             tool(
                 "set_auto_words",
-                "Set the words Auto mode looks for on screen and taps, in priority order.",
+                "Set the words Auto mode looks for on screen and taps, in priority order. " +
+                    "They are saved for the game that was last on screen, or as the default words if none.",
                 "words" to "Comma-separated words, for example Next, OK, Skip"
             )
         )
@@ -104,9 +105,14 @@ class ToolRegistry(private val context: Context) {
     }
 
     private fun setAutoWords(words: String): String {
-        AutoPlayer.saveTargets(context, words)
-        val saved = AutoPlayer.targets(context)
-        return if (saved.isEmpty()) "No words given" else "Auto words set: " + saved.joinToString(", ")
+        val parsed = AutoPlayer.parseWords(words)
+        if (parsed.isEmpty()) return "No words given"
+        // Words go to the game that was last on screen, or to the default words.
+        val game = LilyAccessibilityService.foregroundGame
+        val gameName = libraryGames().firstOrNull { it.packageName == game }?.name
+        AutoPlayer.saveWordsFor(context, if (gameName != null) game else null, words)
+        val target = gameName ?: "all games"
+        return "Auto words set for $target: " + parsed.joinToString(", ")
     }
 
     private fun startAuto(): String {

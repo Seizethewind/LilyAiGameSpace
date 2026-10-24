@@ -14,22 +14,26 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.autoplay.AutoPlayer
 import com.lilyai.capture.ScreenReader
+import com.lilyai.capture.ScreenText
 import com.lilyai.capture.ScreenshotManager
 import kotlin.math.abs
 
-// A small draggable button over other apps. Tap it to show Screenshot, Read text, Auto and Stop.
+// A small draggable button over other apps. Tap it to show Screenshot, Read text, Teach, Auto and Stop.
 // Runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var params: WindowManager.LayoutParams
     private var root: LinearLayout? = null
+    private var teachView: LinearLayout? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,6 +51,7 @@ class GameOverlayService : Service() {
         AutoPlayer.stop()
         root?.let { windowManager.removeView(it) }
         root = null
+        teachView = null
         super.onDestroy()
     }
 
@@ -76,6 +81,14 @@ class GameOverlayService : Service() {
             setPadding(16, 16, 16, 16)
             setOnClickListener { visibility = View.GONE }
         }
+        // The Teach list: tick the words Auto should tap for the current game.
+        val teach = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setBackgroundColor(0xEE333333.toInt())
+            setPadding(16, 16, 16, 16)
+        }
+        teachView = teach
         val screenshot = Button(this).apply {
             text = "Screenshot"
             visibility = View.GONE
@@ -85,6 +98,11 @@ class GameOverlayService : Service() {
             text = "Read text"
             visibility = View.GONE
             setOnClickListener { readScreen(output) }
+        }
+        val teachButton = Button(this).apply {
+            text = "Teach"
+            visibility = View.GONE
+            setOnClickListener { teachScreen() }
         }
         val auto = Button(this).apply {
             text = AUTO_OFF
@@ -100,15 +118,18 @@ class GameOverlayService : Service() {
             addView(handle)
             addView(screenshot)
             addView(readText)
+            addView(teachButton)
             addView(auto)
             addView(stop)
             addView(output)
+            addView(teach)
         }
 
         fun setMenuVisible(visible: Boolean) {
             val state = if (visible) View.VISIBLE else View.GONE
             screenshot.visibility = state
             readText.visibility = state
+            teachButton.visibility = state
             auto.visibility = state
             stop.visibility = state
             if (visible) {
@@ -116,6 +137,7 @@ class GameOverlayService : Service() {
                 auto.text = if (AutoPlayer.running) AUTO_ON else AUTO_OFF
             } else {
                 output.visibility = View.GONE
+                teach.visibility = View.GONE
             }
         }
 
@@ -225,7 +247,114 @@ class GameOverlayService : Service() {
         }, 400)
     }
 
-    // Starts or stops the autoplay loop with the words saved in the LilyAi app.
+    // Teach: read the current screen and let the user tick the words Auto should tap.
+    private fun teachScreen() {
+        val service = LilyAccessibilityService.instance
+        val panel = root
+        val teach = teachView
+        if (service == null || panel == null || teach == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        teach.visibility = View.GONE
+        panel.visibility = View.INVISIBLE
+        panel.postDelayed({
+            ScreenshotManager.captureBitmap(service) { captured ->
+                panel.visibility = View.VISIBLE
+                captured.onSuccess { bitmap ->
+                    ScreenReader.read(bitmap) { outcome ->
+                        bitmap.recycle()
+                        outcome.onSuccess { lines -> showTeachList(teach, candidateWords(lines)) }
+                            .onFailure { toast("Failed: ${it.message}") }
+                    }
+                }.onFailure { toast("Failed: ${it.message}") }
+            }
+        }, 400)
+    }
+
+    // Short lines are the likely buttons. Commas are removed because words are saved comma-separated.
+    private fun candidateWords(lines: List<ScreenText>): List<String> =
+        lines.sortedBy { it.bounds.top }
+            .map { it.text.replace(",", " ").trim() }
+            .filter { it.length in 2..30 }
+            .distinctBy { it.lowercase() }
+            .take(MAX_CHOICES)
+
+    private fun showTeachList(teach: LinearLayout, words: List<String>) {
+        val game = LilyAccessibilityService.foregroundGame
+        val label = game?.let { appLabel(it) } ?: "default words"
+        val saved = AutoPlayer.wordsFor(this, game).ifBlank { "none" }
+        // The words are saved in the order they are ticked, which is their priority.
+        val picked = mutableListOf<String>()
+
+        fun line(content: String, size: Float) = TextView(this).apply {
+            text = content
+            textSize = size
+            setTextColor(Color.WHITE)
+        }
+
+        val choices = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (words.isEmpty()) choices.addView(line("No text found on this screen", 14f))
+        words.forEach { word ->
+            choices.addView(
+                CheckBox(this).apply {
+                    text = word
+                    setTextColor(Color.WHITE)
+                    setOnCheckedChangeListener { _, checked ->
+                        if (checked) picked.add(word) else picked.remove(word)
+                    }
+                }
+            )
+        }
+
+        val save = Button(this).apply {
+            text = "Save"
+            setOnClickListener {
+                if (picked.isEmpty()) {
+                    toastShort("Tick the words to tap first")
+                } else {
+                    AutoPlayer.addWords(this@GameOverlayService, game, picked)
+                    toastShort("Saved for $label: " + picked.joinToString())
+                    teach.visibility = View.GONE
+                }
+            }
+        }
+        val clear = Button(this).apply {
+            text = "Clear saved"
+            setOnClickListener {
+                AutoPlayer.saveWordsFor(this@GameOverlayService, game, "")
+                toastShort("Cleared the words for $label")
+                teach.visibility = View.GONE
+            }
+        }
+        val close = Button(this).apply {
+            text = "Close"
+            setOnClickListener { teach.visibility = View.GONE }
+        }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(save)
+            addView(clear)
+            addView(close)
+        }
+
+        teach.removeAllViews()
+        teach.addView(line("Teach: $label", 14f))
+        teach.addView(line("Saved: $saved", 12f))
+        teach.addView(
+            ScrollView(this).apply { addView(choices) },
+            LinearLayout.LayoutParams(TEACH_WIDTH, TEACH_HEIGHT)
+        )
+        teach.addView(buttons)
+        teach.visibility = View.VISIBLE
+    }
+
+    private fun appLabel(packageName: String): String =
+        runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+        }.getOrDefault(packageName)
+
+    // Starts or stops the autoplay loop with the words saved for the current game.
     // Drag the handle away from anything the loop needs to tap: taps go to whatever is on top.
     private fun toggleAuto(button: Button) {
         if (AutoPlayer.running) {
@@ -236,7 +365,7 @@ class GameOverlayService : Service() {
         }
         val targets = AutoPlayer.targets(this)
         if (targets.isEmpty()) {
-            toast("Set the Auto words in the LilyAi app first")
+            toast("No words yet. Use Teach on a game screen, or set default words in the LilyAi app")
             return
         }
         if (LilyAccessibilityService.instance == null) {
@@ -263,5 +392,8 @@ class GameOverlayService : Service() {
         const val TAP_SLOP = 10
         const val AUTO_ON = "Auto: ON"
         const val AUTO_OFF = "Auto: OFF"
+        const val TEACH_WIDTH = 600
+        const val TEACH_HEIGHT = 500
+        const val MAX_CHOICES = 40
     }
 }
