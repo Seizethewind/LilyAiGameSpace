@@ -8,9 +8,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// Autoplay loop: every couple of seconds, look for any of the chosen words on screen and
-// tap the first one found. Runs until stop() is called or something keeps failing.
-// Each game can have its own words. The default words are used when a game has none.
+// Autoplay loop: every couple of seconds, look at the screen. If a stop word is there, stop.
+// Otherwise tap the first of the chosen words that is there. Runs until stop() is called or
+// something keeps failing. Each game can have its own words. The default words are used when a
+// game has none.
 object AutoPlayer {
 
     private const val DEFAULT_INTERVAL_MS = 2000L
@@ -20,6 +21,8 @@ object AutoPlayer {
     private const val PREFS = "autoplay"
     private const val KEY_WORDS = "words"
     private const val KEY_GAME_PREFIX = "words:"
+    private const val KEY_STOP = "stop"
+    private const val KEY_STOP_GAME_PREFIX = "stop:"
     private const val KEY_INTERVAL = "interval_ms"
 
     private val handler = Handler(Looper.getMainLooper())
@@ -56,9 +59,19 @@ object AutoPlayer {
 
     /** Adds words after the saved ones, skipping any that are already there. */
     fun addWords(context: Context, game: String?, words: List<String>) {
-        val existing = parseWords(wordsFor(context, game))
-        val added = words.filter { word -> existing.none { it.equals(word, ignoreCase = true) } }
-        saveWordsFor(context, game, (existing + added).joinToString(", "))
+        saveWordsFor(context, game, merge(parseWords(wordsFor(context, game)), words))
+    }
+
+    /** Stop words: if one is on screen, Auto stops instead of tapping. */
+    fun stopWordsFor(context: Context, game: String?): String =
+        prefs(context).getString(stopKey(game), "").orEmpty()
+
+    fun saveStopWordsFor(context: Context, game: String?, raw: String) {
+        prefs(context).edit().putString(stopKey(game), raw).apply()
+    }
+
+    fun addStopWords(context: Context, game: String?, words: List<String>) {
+        saveStopWordsFor(context, game, merge(parseWords(stopWordsFor(context, game)), words))
     }
 
     fun parseWords(raw: String): List<String> =
@@ -68,6 +81,12 @@ object AutoPlayer {
     fun targets(context: Context): List<String> {
         val game = LilyAccessibilityService.foregroundGame
         return parseWords(wordsFor(context, game)).ifEmpty { parseWords(rawTargets(context)) }
+    }
+
+    /** The stop words for the current game, else the default stop words. */
+    fun stopWords(context: Context): List<String> {
+        val game = LilyAccessibilityService.foregroundGame
+        return parseWords(stopWordsFor(context, game)).ifEmpty { parseWords(stopWordsFor(context, null)) }
     }
 
     /** Seconds between looks at the screen. */
@@ -98,8 +117,10 @@ object AutoPlayer {
         taps = 0
         currentInterval = prefs(context).getLong(KEY_INTERVAL, DEFAULT_INTERVAL_MS)
         generation++
-        record("Started: " + targets.joinToString(", "))
-        step(generation, targets, onEvent)
+        val stops = stopWords(context)
+        val stopNote = if (stops.isEmpty()) "" else " (stops on: " + stops.joinToString(", ") + ")"
+        record("Started: " + targets.joinToString(", ") + stopNote)
+        step(generation, targets, stops, onEvent)
     }
 
     fun stop(reason: String = "Stopped") {
@@ -109,43 +130,79 @@ object AutoPlayer {
         handler.removeCallbacksAndMessages(null)
     }
 
-    private fun step(run: Int, targets: List<String>, onEvent: (String) -> Unit) {
+    private fun halt(reason: String, onEvent: (String) -> Unit) {
+        stop(reason)
+        onEvent(reason)
+    }
+
+    private fun step(run: Int, targets: List<String>, stops: List<String>, onEvent: (String) -> Unit) {
         if (!running || run != generation) return
         val service = LilyAccessibilityService.instance
         if (service == null) {
-            val reason = "Auto stopped: the accessibility service is off"
-            stop(reason)
-            onEvent(reason)
+            halt("Auto stopped: the accessibility service is off", onEvent)
             return
         }
-        ScreenActions.tapAny(service, targets) { result ->
-            if (!running || run != generation) return@tapAny
+        ScreenActions.readScreen(service) { result ->
+            if (!running || run != generation) return@readScreen
             scans++
-            val tapped = result.getOrNull()
-            val failure = result.exceptionOrNull()
-            when {
-                tapped != null -> {
+            val lines = result.getOrNull()
+            if (lines == null) {
+                errors++
+                val message = result.exceptionOrNull()?.message
+                record("Error: $message")
+                if (errors >= MAX_ERRORS) {
+                    halt("Auto stopped: $message", onEvent)
+                } else {
+                    scheduleNext(run, targets, stops, onEvent)
+                }
+                return@readScreen
+            }
+            errors = 0
+
+            // A stop word always wins over a word to tap.
+            val stopHit = ScreenActions.findFirst(lines, stops)
+            if (stopHit != null) {
+                halt("Auto stopped: saw ${stopHit.text}", onEvent)
+                return@readScreen
+            }
+
+            // Nothing to tap on this screen is normal, so keep looping quietly.
+            val match = ScreenActions.findFirst(lines, targets)
+            if (match == null) {
+                scheduleNext(run, targets, stops, onEvent)
+                return@readScreen
+            }
+            ScreenActions.tapLine(service, match) { tapped ->
+                if (!running || run != generation) return@tapLine
+                if (tapped) {
                     errors = 0
                     taps++
-                    record("Tapped ${tapped.text}")
-                    onEvent("Tapped ${tapped.text}")
-                }
-                // Nothing to tap on this screen is normal, so keep looping quietly.
-                failure is NoSuchElementException -> errors = 0
-                else -> {
+                    record("Tapped ${match.text}")
+                    onEvent("Tapped ${match.text}")
+                } else {
                     errors++
-                    record("Error: ${failure?.message}")
+                    record("Error: the tap failed")
                     if (errors >= MAX_ERRORS) {
-                        val reason = "Auto stopped: ${failure?.message}"
-                        stop(reason)
-                        onEvent(reason)
-                        return@tapAny
+                        halt("Auto stopped: taps keep failing", onEvent)
+                        return@tapLine
                     }
                 }
+                scheduleNext(run, targets, stops, onEvent)
             }
-            handler.postDelayed({ step(run, targets, onEvent) }, currentInterval)
         }
     }
+
+    private fun scheduleNext(run: Int, targets: List<String>, stops: List<String>, onEvent: (String) -> Unit) {
+        handler.postDelayed({ step(run, targets, stops, onEvent) }, currentInterval)
+    }
+
+    // Existing words keep their place. New ones are added after them, skipping duplicates.
+    private fun merge(existing: List<String>, words: List<String>): String {
+        val added = words.filter { word -> existing.none { it.equals(word, ignoreCase = true) } }
+        return (existing + added).joinToString(", ")
+    }
+
+    private fun stopKey(game: String?) = if (game == null) KEY_STOP else KEY_STOP_GAME_PREFIX + game
 
     private fun record(message: String) {
         events.addLast(clock.format(Date()) + " " + message)
