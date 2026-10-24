@@ -14,17 +14,20 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.autoplay.AutoPlayer
 import com.lilyai.autoplay.ScreenActions
 import com.lilyai.capture.ScreenshotManager
 import com.lilyai.overlay.GameOverlayService
 
-// Game library (tap to launch, long-press to remove) plus the screenshot, overlay and tap-test controls.
+// Game library (tap to launch, long-press to remove) plus the overlay, Auto words and test controls.
 class GameSpaceActivity : Activity() {
 
     private lateinit var status: TextView
+    private lateinit var autoWords: EditText
     private lateinit var list: ListView
     private lateinit var repository: GameRepository
     private lateinit var detector: GameDetector
@@ -47,6 +50,12 @@ class GameSpaceActivity : Activity() {
         val overlay = Button(this).apply {
             text = "Show overlay"
             setOnClickListener { showOverlay(askPermission = true) }
+        }
+        // Words for the overlay's Auto mode, in priority order. Saved when you leave this screen.
+        autoWords = EditText(this).apply {
+            hint = "Auto mode words, for example Next, OK, Skip"
+            setSingleLine()
+            setText(AutoPlayer.rawTargets(this@GameSpaceActivity))
         }
         // Tap test: the target counts real touches. The second button taps it through
         // the accessibility service, so the count going up proves gestures work.
@@ -91,18 +100,27 @@ class GameSpaceActivity : Activity() {
             }
         }
 
-        setContentView(LinearLayout(this).apply {
+        // The controls scroll in the top half so the game list keeps the bottom half.
+        val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 96, 48, 48)
             addView(status)
             addView(openSettings)
             addView(screenshot)
             addView(overlay)
+            addView(autoWords)
             addView(tapTarget)
             addView(autoTap)
             addView(tapQuery)
             addView(tapText)
             addView(addGame)
+        }
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 96, 48, 48)
+            addView(
+                ScrollView(this@GameSpaceActivity).apply { addView(controls) },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            )
             addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         })
     }
@@ -115,6 +133,11 @@ class GameSpaceActivity : Activity() {
             "Accessibility service: OFF"
         }
         refreshList()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        AutoPlayer.saveTargets(this, autoWords.text.toString())
     }
 
     private fun refreshList() {
