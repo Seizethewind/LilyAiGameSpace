@@ -124,7 +124,7 @@ class ToolRegistry(private val context: Context) {
         if (AutoPlayer.running) return "Auto is already running"
         // Auto needs the overlay on screen so the user always has a Stop control.
         if (!startOverlay()) return "Overlay permission is missing. The user must allow it first"
-        AutoPlayer.start(targets) { event ->
+        AutoPlayer.start(context, targets) { event ->
             Toast.makeText(context, event, Toast.LENGTH_SHORT).show()
         }
         return "Auto started with: " + targets.joinToString(", ")
