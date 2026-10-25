@@ -1,9 +1,14 @@
 name: Release
 
-# Run it by hand: Actions tab, choose "Release", tap "Run workflow", and type the version.
-# It builds the app and publishes the APK as a GitHub Release (marked as a test release).
+# Two ways to use it:
+# 1. Publish a release on GitHub (Releases, Draft a new release, pick a tag, Publish).
+#    The app is built from that tag and the APK is attached to your release.
+# 2. Run it by hand: Actions tab, choose "Release", tap "Run workflow", and type the version.
+#    It creates the release itself.
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -17,6 +22,11 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVENT: ${{ github.event_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,20 +39,30 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      # The tag is v0.1.0 or 0.1.0. The app's version name is the tag without a leading v.
+      - name: Work out the version
+        run: |
+          if [ "$EVENT" = "release" ]; then
+            TAG="$RELEASE_TAG"
+          else
+            TAG="v$INPUT_VERSION"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
       # A debug-type build: it is signed automatically, so it can be installed on a phone.
       - name: Build the APK
-        env:
-          VERSION: ${{ inputs.version }}
         run: gradle assembleDebug -PversionName="$VERSION" --stacktrace
 
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+      - name: Publish the APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk "LilyAi-$VERSION.apk"
-          gh release create "v$VERSION" "LilyAi-$VERSION.apk" \
-            --title "LilyAi $VERSION (test)" \
-            --notes "Test build. After installing, turn on the LilyAi accessibility service in Android settings." \
-            --prerelease \
-            --target "$GITHUB_SHA"
+          if [ "$EVENT" = "release" ]; then
+            gh release upload "$TAG" "LilyAi-$VERSION.apk" --clobber
+          else
+            gh release create "$TAG" "LilyAi-$VERSION.apk" \
+              --title "LilyAi $VERSION (test)" \
+              --notes "Test build. After installing, turn on the LilyAi accessibility service in Android settings." \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
