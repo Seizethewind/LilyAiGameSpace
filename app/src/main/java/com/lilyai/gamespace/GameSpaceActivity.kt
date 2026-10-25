@@ -12,6 +12,7 @@ import androidx.drawerlayout.widget.DrawerLayout
 import com.lilyai.ui.ChatScreen
 import com.lilyai.ui.GamesScreen
 import com.lilyai.ui.HomeScreen
+import com.lilyai.ui.LocalAiScreen
 import com.lilyai.ui.Palette
 import com.lilyai.ui.RecordsScreen
 import com.lilyai.ui.Screen
@@ -22,7 +23,7 @@ import com.lilyai.ui.heading
 import com.lilyai.ui.softGradient
 
 // The app shell: a front page with just the name, and a drawer on the left (swipe in from the
-// left edge, or tap the menu icon) that opens Games, Records, Secrets, Chat and Setup.
+// left edge, or tap the menu icon) that opens Games, Records, Secrets, Chat, LilyAi and Setup.
 // A page can open another page on top of it (Secrets opens a provider). Back goes down one.
 class GameSpaceActivity : Activity() {
 
@@ -42,6 +43,7 @@ class GameSpaceActivity : Activity() {
             "\uD83D\uDCD2" to RecordsScreen(this),
             "\uD83D\uDD11" to SecretsScreen(this, this::open),
             "\uD83D\uDCAC" to ChatScreen(this),
+            "\uD83C\uDF38" to LocalAiScreen(this),
             "\u2699\uFE0F" to SetupScreen(this)
         )
 
