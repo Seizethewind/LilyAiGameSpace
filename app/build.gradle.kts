@@ -12,8 +12,10 @@ android {
         // 30 = Android 11, the minimum for AccessibilityService.takeScreenshot()
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // Rises with every build, so a newer APK is never refused as a downgrade.
+        versionCode = (System.currentTimeMillis() / 1000).toInt()
+        // The release workflow passes the version it was asked for (-PversionName=...).
+        versionName = (project.findProperty("versionName") as String?) ?: "0.1.0"
     }
 
     compileOptions {
