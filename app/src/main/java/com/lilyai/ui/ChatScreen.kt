@@ -7,6 +7,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.lilyai.ai.ConversationManager
 import com.lilyai.ai.GroqClient
+import com.lilyai.ai.Provider
+import com.lilyai.ai.ProviderSettings
 import com.lilyai.ai.ToolRegistry
 
 // Talk to LilyAi. It remembers the last few messages, and it can launch games and run Auto.
@@ -42,18 +44,20 @@ class ChatScreen(private val activity: Activity) : Screen {
     override fun view(): View = scroll
 
     private fun ask() {
-        val key = GroqClient.savedKey(activity)
         val text = question.text.toString().trim()
-        if (key.isEmpty()) {
-            activity.toast("Save your Groq key in Secrets first")
-            return
-        }
         if (text.isEmpty()) {
             activity.toast("Type a question first")
             return
         }
+        // Each question takes the next Groq key in turn (key 1, 2 ... last, then 1 again).
+        val keys = ProviderSettings.takeTurn(activity, Provider.GROQ)
+        if (keys.isEmpty()) {
+            activity.toast("Add a Groq key in Secrets first")
+            return
+        }
         answer.text = "Thinking..."
-        GroqClient.ask(key, GroqClient.savedModel(activity), text, ConversationManager.history(), tools) { result ->
+        val model = ProviderSettings.model(activity, Provider.GROQ)
+        GroqClient.ask(keys, model, text, ConversationManager.history(), tools) { result ->
             result.onSuccess { reply ->
                 ConversationManager.addExchange(text, reply)
                 question.setText("")

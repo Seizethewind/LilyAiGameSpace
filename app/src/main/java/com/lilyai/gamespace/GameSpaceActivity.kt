@@ -23,6 +23,7 @@ import com.lilyai.ui.softGradient
 
 // The app shell: a front page with just the name, and a drawer on the left (swipe in from the
 // left edge, or tap the menu icon) that opens Games, Records, Secrets, Chat and Setup.
+// A page can open another page on top of it (Secrets opens a provider). Back goes down one.
 class GameSpaceActivity : Activity() {
 
     private lateinit var drawer: DrawerLayout
@@ -30,6 +31,7 @@ class GameSpaceActivity : Activity() {
     private lateinit var screenTitle: TextView
     private lateinit var home: Screen
     private var current: Screen? = null
+    private val backStack = ArrayDeque<Screen>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,7 +40,7 @@ class GameSpaceActivity : Activity() {
         val entries = listOf(
             "\uD83C\uDFAE" to GamesScreen(this),
             "\uD83D\uDCD2" to RecordsScreen(this),
-            "\uD83D\uDD11" to SecretsScreen(this),
+            "\uD83D\uDD11" to SecretsScreen(this, this::open),
             "\uD83D\uDCAC" to ChatScreen(this),
             "\u2699\uFE0F" to SetupScreen(this)
         )
@@ -80,7 +82,11 @@ class GameSpaceActivity : Activity() {
                     textSize = 18f
                     setTextColor(Palette.plum)
                     setPadding(dp(8), dp(14), dp(8), dp(14))
-                    setOnClickListener { show(screen) }
+                    setOnClickListener {
+                        // Picking from the drawer starts fresh, with nothing to go back to.
+                        backStack.clear()
+                        show(screen)
+                    }
                 })
             }
         }
@@ -115,9 +121,16 @@ class GameSpaceActivity : Activity() {
     override fun onBackPressed() {
         when {
             drawer.isDrawerOpen(Gravity.START) -> drawer.closeDrawers()
+            backStack.isNotEmpty() -> show(backStack.removeLast())
             current !== home -> show(home)
             else -> super.onBackPressed()
         }
+    }
+
+    // Opens a page on top of the current one, so Back returns to it.
+    private fun open(screen: Screen) {
+        current?.let { backStack.addLast(it) }
+        show(screen)
     }
 
     private fun show(screen: Screen) {
