@@ -7,33 +7,40 @@ import android.app.Service
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.lilyai.accessibility.LilyAccessibilityService
 import com.lilyai.autoplay.AutoPlayer
+import com.lilyai.capture.FocusArea
 import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenText
 import com.lilyai.capture.ScreenshotManager
+import com.lilyai.ui.dp
+import com.lilyai.ui.pinkButton
 import kotlin.math.abs
 
-// A small draggable button over other apps. Tap it to show Screenshot, Read text, Teach, Auto and Stop.
-// Runs as a foreground service so Android keeps it alive while a game is open.
+// A small draggable button over other apps. Tap it to show Screenshot, Read text, Focus area, Teach,
+// Auto and Stop. Runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var params: WindowManager.LayoutParams
     private var root: LinearLayout? = null
     private var teachView: LinearLayout? = null
+    private var selector: View? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,6 +56,7 @@ class GameOverlayService : Service() {
 
     override fun onDestroy() {
         AutoPlayer.stop()
+        closeFocusSelector()
         root?.let { windowManager.removeView(it) }
         root = null
         teachView = null
@@ -99,6 +107,10 @@ class GameOverlayService : Service() {
             visibility = View.GONE
             setOnClickListener { readScreen(output) }
         }
+        val focusButton = Button(this).apply {
+            text = "Focus area"
+            visibility = View.GONE
+        }
         val teachButton = Button(this).apply {
             text = "Teach"
             visibility = View.GONE
@@ -138,6 +150,7 @@ class GameOverlayService : Service() {
             addView(handle)
             addView(screenshot)
             addView(readText)
+            addView(focusButton)
             addView(teachButton)
             addView(auto)
             addView(speed)
@@ -151,6 +164,7 @@ class GameOverlayService : Service() {
             val state = if (visible) View.VISIBLE else View.GONE
             screenshot.visibility = state
             readText.visibility = state
+            focusButton.visibility = state
             teachButton.visibility = state
             auto.visibility = state
             speed.visibility = state
@@ -170,6 +184,12 @@ class GameOverlayService : Service() {
         auto.setOnClickListener {
             toggleAuto(auto)
             setMenuVisible(false)
+        }
+
+        // Drawing the focus box needs the whole screen, so the menu folds away first.
+        focusButton.setOnClickListener {
+            setMenuVisible(false)
+            showFocusSelector()
         }
 
         params = WindowManager.LayoutParams(
@@ -227,6 +247,98 @@ class GameOverlayService : Service() {
         }
     }
 
+    // The screen's size in pixels, the same as a screenshot's.
+    private fun screenBounds(): Rect = windowManager.currentWindowMetrics.bounds
+
+    // The focus box saved for the current game, or null if there is none.
+    private fun currentFocus(): Rect? {
+        val bounds = screenBounds()
+        return FocusArea.get(this, LilyAccessibilityService.foregroundGame, bounds.width(), bounds.height())
+    }
+
+    // Focus area: draw a box on screen. Read text and Teach then only look inside it.
+    private fun showFocusSelector() {
+        if (selector != null) return
+        val game = LilyAccessibilityService.foregroundGame
+        val label = game?.let { appLabel(it) } ?: "default"
+        val bounds = screenBounds()
+
+        val drawing = FocusSelectorView(this)
+        val hint = TextView(this).apply {
+            text = "Drag to draw a box around the area. Drag inside it to move it. Drag a corner to resize it."
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+
+        fun barButton(text: String, onClick: () -> Unit) = pinkButton(text, onClick).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
+        }
+
+        val save = barButton("Save") {
+            val area = drawing.screenRect()
+            if (area == null) {
+                toastShort("Draw a box first")
+            } else {
+                FocusArea.save(this, game, area, bounds.width(), bounds.height())
+                toastShort("Focus area saved for $label")
+                closeFocusSelector()
+            }
+        }
+        val clear = barButton("Clear") {
+            FocusArea.clear(this, game)
+            toastShort("Focus area cleared for $label")
+            closeFocusSelector()
+        }
+        val cancel = barButton("Cancel") { closeFocusSelector() }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(save)
+            addView(clear)
+            addView(cancel)
+        }
+
+        val layer = FrameLayout(this).apply {
+            addView(drawing, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(
+                hint,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP
+                ).apply { topMargin = dp(48) }
+            )
+            addView(
+                bar,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM
+                ).apply { bottomMargin = dp(96) }
+            )
+        }
+
+        val layerParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        windowManager.addView(layer, layerParams)
+        selector = layer
+        currentFocus()?.let { drawing.setScreenRect(it) }
+    }
+
+    private fun closeFocusSelector() {
+        selector?.let { windowManager.removeView(it) }
+        selector = null
+    }
+
     private fun takeScreenshot() {
         val service = LilyAccessibilityService.instance
         val panel = root
@@ -245,6 +357,7 @@ class GameOverlayService : Service() {
     }
 
     // Takes a screenshot, reads the text on it and shows the lines in the overlay.
+    // With a focus area, only the text inside the box is shown.
     private fun readScreen(output: TextView) {
         val service = LilyAccessibilityService.instance
         val panel = root
@@ -261,10 +374,13 @@ class GameOverlayService : Service() {
                     ScreenReader.read(bitmap) { outcome ->
                         bitmap.recycle()
                         outcome.onSuccess { lines ->
-                            output.text = if (lines.isEmpty()) {
-                                "No text found"
+                            val focus = currentFocus()
+                            val shown = FocusArea.filter(lines, focus)
+                            val where = if (focus != null) " in the focus area" else ""
+                            output.text = if (shown.isEmpty()) {
+                                "No text found$where"
                             } else {
-                                lines.joinToString("\n") { it.text }
+                                shown.joinToString("\n") { it.text }
                             }
                             output.visibility = View.VISIBLE
                         }.onFailure { toast("Failed: ${it.message}") }
@@ -275,6 +391,7 @@ class GameOverlayService : Service() {
     }
 
     // Teach: read the current screen and let the user tick the words Auto should tap or stop on.
+    // With a focus area, only the text inside the box is listed.
     private fun teachScreen() {
         val service = LilyAccessibilityService.instance
         val panel = root
@@ -291,8 +408,10 @@ class GameOverlayService : Service() {
                 captured.onSuccess { bitmap ->
                     ScreenReader.read(bitmap) { outcome ->
                         bitmap.recycle()
-                        outcome.onSuccess { lines -> showTeachList(teach, candidateWords(lines)) }
-                            .onFailure { toast("Failed: ${it.message}") }
+                        outcome.onSuccess { lines ->
+                            val inFocus = FocusArea.filter(lines, currentFocus())
+                            showTeachList(teach, candidateWords(inFocus))
+                        }.onFailure { toast("Failed: ${it.message}") }
                     }
                 }.onFailure { toast("Failed: ${it.message}") }
             }
