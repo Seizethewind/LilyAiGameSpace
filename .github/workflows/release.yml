@@ -4,7 +4,8 @@ name: Release
 # 1. Publish a release on GitHub (Releases, Draft a new release, pick a tag, Publish).
 #    The app is built from that tag and the APK is attached to your release.
 # 2. Run it by hand: Actions tab, choose "Release", tap "Run workflow", and type the version.
-#    It creates the release itself.
+#    The tag is exactly what you type. If a release with that tag exists, the APK is added to it.
+#    Otherwise the release is created.
 
 on:
   release:
@@ -12,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version number, for example 0.1.0
+        description: Version number, for example 0.1.1
         required: true
-        default: "0.1.0"
+        default: "0.1.1"
 
 permissions:
   contents: write
@@ -39,13 +40,13 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      # The tag is v0.1.0 or 0.1.0. The app's version name is the tag without a leading v.
+      # The app's version name is the tag without a leading v (0.1.1 and v0.1.1 both give 0.1.1).
       - name: Work out the version
         run: |
           if [ "$EVENT" = "release" ]; then
             TAG="$RELEASE_TAG"
           else
-            TAG="v$INPUT_VERSION"
+            TAG="$INPUT_VERSION"
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
@@ -57,7 +58,7 @@ jobs:
       - name: Publish the APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk "LilyAi-$VERSION.apk"
-          if [ "$EVENT" = "release" ]; then
+          if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "LilyAi-$VERSION.apk" --clobber
           else
             gh release create "$TAG" "LilyAi-$VERSION.apk" \
@@ -66,3 +67,5 @@ jobs:
               --prerelease \
               --target "$GITHUB_SHA"
           fi
+          echo "Files on release $TAG:"
+          gh release view "$TAG" --json assets --jq '.assets[].name'
