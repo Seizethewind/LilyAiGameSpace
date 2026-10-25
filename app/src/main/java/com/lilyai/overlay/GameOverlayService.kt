@@ -1,5 +1,6 @@
 package com.lilyai.overlay
 
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,14 +9,16 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -28,19 +31,46 @@ import com.lilyai.capture.FocusArea
 import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenText
 import com.lilyai.capture.ScreenshotManager
+import com.lilyai.ui.Palette
 import com.lilyai.ui.dp
 import com.lilyai.ui.pinkButton
 import kotlin.math.abs
+import kotlin.math.max
 
-// A small draggable button over other apps. Tap it to show Screenshot, Read text, Focus area, Teach,
-// Auto and Stop. Runs as a foreground service so Android keeps it alive while a game is open.
+// The overlay: a small pink L that sits over other apps.
+// - It slides to the screen edge when idle, leaving a thin tab. Swipe the tab inward, or tap it.
+// - Tapping the L opens a menu with two pages. Swipe sideways to move between them.
+//   Page 1: Chat, Focus area, Teach, Auto, Pause, Stop overlay.
+//   Page 2: Screenshot, Read text, Speed, Auto log.
+// It runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var params: WindowManager.LayoutParams
+    private val handler = Handler(Looper.getMainLooper())
+
     private var root: LinearLayout? = null
+    private var handleView: TextView? = null
+    private var menuCard: LinearLayout? = null
+    private var statusLine: TextView? = null
+    private var outputView: TextView? = null
     private var teachView: LinearLayout? = null
     private var selector: View? = null
+    private var chat: OverlayChat? = null
+
+    private var autoTile: Tile? = null
+    private var pauseTile: Tile? = null
+    private var speedTile: Tile? = null
+
+    private var menuOpen = false
+    private var docked = false
+    private var dockLeft = true
+
+    private val handleWidth by lazy { dp(44) }
+    private val handleHeight by lazy { dp(48) }
+    private val sliver by lazy { dp(14) }
+    private val menuWidth by lazy { dp(272) }
+    private val dockRunnable = Runnable { dock() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,10 +86,17 @@ class GameOverlayService : Service() {
 
     override fun onDestroy() {
         AutoPlayer.stop()
+        handler.removeCallbacksAndMessages(null)
+        chat?.hide()
         closeFocusSelector()
-        root?.let { windowManager.removeView(it) }
+        root?.let { runCatching { windowManager.removeView(it) } }
         root = null
+        handleView = null
+        menuCard = null
+        statusLine = null
+        outputView = null
         teachView = null
+        chat = null
         super.onDestroy()
     }
 
@@ -77,145 +114,168 @@ class GameOverlayService : Service() {
     private fun showOverlay() {
         windowManager = getSystemService(WindowManager::class.java)
 
-        val handle = Button(this).apply { text = "L" }
+        val handle = TextView(this).apply {
+            text = "L"
+            textSize = 20f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(Palette.white)
+            background = this@GameOverlayService.handleBackground()
+            layoutParams = LinearLayout.LayoutParams(handleWidth, handleHeight)
+        }
+
+        val status = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(Palette.plum)
+        }
+
+        // Page 1
+        val chatTile = Tile(this, "\uD83D\uDCAC", "Chat") {
+            closeMenu()
+            openChat()
+        }
+        val focusTile = Tile(this, "\uD83C\uDFAF", "Focus area") {
+            closeMenu()
+            showFocusSelector()
+        }
+        val teachTile = Tile(this, "\uD83C\uDF93", "Teach") {
+            closeMenu()
+            teachScreen()
+        }
+        val auto = Tile(this, "\u25B6\uFE0F", "Auto") { toggleAuto() }
+        val pause = Tile(this, "\u23F8\uFE0F", "Pause") { togglePause() }
+        val stopTile = Tile(this, "\u23F9\uFE0F", "Stop overlay") { stopSelf() }
+
+        // Page 2
+        val shot = Tile(this, "\uD83D\uDCF8", "Screenshot") {
+            closeMenu()
+            takeScreenshot()
+        }
+        val read = Tile(this, "\uD83D\uDD0E", "Read text") {
+            closeMenu()
+            readScreen()
+        }
+        val speed = Tile(this, "\u23F1\uFE0F", "Speed") {
+            AutoPlayer.cycleInterval(this@GameOverlayService)
+            updateStates()
+        }
+        val logTile = Tile(this, "\uD83D\uDCDC", "Auto log") {
+            closeMenu()
+            showLog()
+        }
+
+        val pageWidth = menuWidth - dp(20)
+        fun page(vararg rows: LinearLayout) = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(pageWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+            rows.forEach { addView(it) }
+        }
+        val pages = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(page(tileRow(chatTile, focusTile, teachTile), tileRow(auto, pause, stopTile)))
+            addView(page(tileRow(shot, read, speed), tileRow(logTile, null, null)))
+        }
+        val dots = TextView(this).apply {
+            text = DOTS_FIRST
+            gravity = Gravity.CENTER
+            setTextColor(Palette.pinkDeep)
+        }
+        val pager = PagerScroll(this).apply {
+            addView(pages)
+            setOnScrollChangeListener { _, scrollX, _, _, _ ->
+                dots.text = if (scrollX >= pageWidth / 2) DOTS_SECOND else DOTS_FIRST
+            }
+            // When the finger lifts, settle on the nearer page.
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    val target = if (scrollX >= pageWidth / 2) pageWidth else 0
+                    post { smoothScrollTo(target, 0) }
+                }
+                false
+            }
+        }
+
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = this@GameOverlayService.panelBackground()
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(6) }
+            addView(status)
+            addView(pager, LinearLayout.LayoutParams(pageWidth, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(dots)
+        }
+
         // Shows the text found on screen, or the Auto log. Tap it to hide it.
         val output = TextView(this).apply {
             visibility = View.GONE
             textSize = 12f
             maxLines = 12
-            maxWidth = 700
-            setTextColor(Color.WHITE)
-            setBackgroundColor(0xCC000000.toInt())
-            setPadding(16, 16, 16, 16)
-            setOnClickListener { visibility = View.GONE }
+            setTextColor(Palette.plum)
+            background = this@GameOverlayService.panelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(6) }
+            setOnClickListener {
+                visibility = View.GONE
+                scheduleDock()
+            }
         }
+
         // The Teach list: tick the words Auto should tap, or stop on, for the current game.
         val teach = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setBackgroundColor(0xEE333333.toInt())
-            setPadding(16, 16, 16, 16)
+            background = this@GameOverlayService.panelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(6) }
         }
-        teachView = teach
-        val screenshot = Button(this).apply {
-            text = "Screenshot"
-            visibility = View.GONE
-            setOnClickListener { takeScreenshot() }
-        }
-        val readText = Button(this).apply {
-            text = "Read text"
-            visibility = View.GONE
-            setOnClickListener { readScreen(output) }
-        }
-        val focusButton = Button(this).apply {
-            text = "Focus area"
-            visibility = View.GONE
-        }
-        val teachButton = Button(this).apply {
-            text = "Teach"
-            visibility = View.GONE
-            setOnClickListener { teachScreen() }
-        }
-        val auto = Button(this).apply {
-            text = AUTO_OFF
-            visibility = View.GONE
-        }
-        // Cycles how often Auto looks at the screen: 1, 2, 3 or 5 seconds.
-        val speed = Button(this).apply {
-            text = speedLabel()
-            visibility = View.GONE
-            setOnClickListener {
-                val next = AutoPlayer.cycleInterval(this@GameOverlayService)
-                text = "Speed: ${next / 1000}s"
-            }
-        }
-        // Shows what Auto did: how many looks and taps, and the latest events.
-        val log = Button(this).apply {
-            text = "Auto log"
-            visibility = View.GONE
-            setOnClickListener {
-                val events = AutoPlayer.recentEvents().take(LOG_LINES)
-                output.text = AutoPlayer.summary() + "\n" +
-                    events.joinToString("\n").ifEmpty { "No events yet" }
-                output.visibility = View.VISIBLE
-            }
-        }
-        val stop = Button(this).apply {
-            text = "Stop"
-            visibility = View.GONE
-            setOnClickListener { stopSelf() }
-        }
+
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(handle)
-            addView(screenshot)
-            addView(readText)
-            addView(focusButton)
-            addView(teachButton)
-            addView(auto)
-            addView(speed)
-            addView(log)
-            addView(stop)
+            addView(menu)
             addView(output)
             addView(teach)
         }
 
-        fun setMenuVisible(visible: Boolean) {
-            val state = if (visible) View.VISIBLE else View.GONE
-            screenshot.visibility = state
-            readText.visibility = state
-            focusButton.visibility = state
-            teachButton.visibility = state
-            auto.visibility = state
-            speed.visibility = state
-            log.visibility = state
-            stop.visibility = state
-            if (visible) {
-                // Auto can also be started or stopped by the assistant, so show the real state.
-                auto.text = if (AutoPlayer.running) AUTO_ON else AUTO_OFF
-                speed.text = speedLabel()
-            } else {
-                output.visibility = View.GONE
-                teach.visibility = View.GONE
-            }
-        }
-
-        // Starting Auto folds the menu away so only the small handle stays on screen.
-        auto.setOnClickListener {
-            toggleAuto(auto)
-            setMenuVisible(false)
-        }
-
-        // Drawing the focus box needs the whole screen, so the menu folds away first.
-        focusButton.setOnClickListener {
-            setMenuVisible(false)
-            showFocusSelector()
-        }
-
+        // FLAG_LAYOUT_NO_LIMITS lets the window sit partly off the screen, which docking needs.
         params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 300
+            x = dp(4)
+            y = dp(160)
         }
 
-        handle.setOnTouchListener(dragAndTap(panel) {
-            setMenuVisible(screenshot.visibility != View.VISIBLE)
-        })
-
+        handle.setOnTouchListener(handleTouch(panel))
         windowManager.addView(panel, params)
+
         root = panel
+        handleView = handle
+        menuCard = menu
+        statusLine = status
+        outputView = output
+        teachView = teach
+        autoTile = auto
+        pauseTile = pause
+        speedTile = speed
+        updateStates()
+        scheduleDock()
     }
 
-    private fun speedLabel() = "Speed: ${AutoPlayer.intervalSeconds(this)}s"
+    // ---- Moving, docking and the menu ----
 
-    // Drag moves the overlay. A touch that barely moves counts as a tap.
-    private fun dragAndTap(panel: View, onTap: () -> Unit) = object : View.OnTouchListener {
+    // Drag moves the L. A tap opens or closes the menu. Touching a docked L (a tap, or a swipe
+    // inward) brings it back.
+    private fun handleTouch(panel: View) = object : View.OnTouchListener {
         private var startX = 0
         private var startY = 0
         private var touchX = 0f
@@ -223,8 +283,9 @@ class GameOverlayService : Service() {
         private var moved = false
 
         override fun onTouch(view: View, event: MotionEvent): Boolean {
-            when (event.action) {
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    handler.removeCallbacks(dockRunnable)
                     startX = params.x
                     startY = params.y
                     touchX = event.rawX
@@ -236,12 +297,18 @@ class GameOverlayService : Service() {
                     val dy = (event.rawY - touchY).toInt()
                     if (abs(dx) > TAP_SLOP || abs(dy) > TAP_SLOP) moved = true
                     if (moved) {
-                        params.x = startX + dx
-                        params.y = startY + dy
+                        docked = false
+                        val bounds = screenBounds()
+                        val expanded = menuOpen || panelBusy()
+                        val minX = if (expanded) 0 else -(handleWidth - sliver)
+                        val maxX = if (expanded) max(0, bounds.width() - menuWidth) else bounds.width() - sliver
+                        params.x = (startX + dx).coerceIn(minX, maxX)
+                        params.y = (startY + dy).coerceIn(0, bounds.height() - handleHeight)
                         windowManager.updateViewLayout(panel, params)
                     }
                 }
-                MotionEvent.ACTION_UP -> if (!moved) onTap()
+                MotionEvent.ACTION_UP -> if (moved) scheduleDock() else toggleMenu()
+                MotionEvent.ACTION_CANCEL -> scheduleDock()
             }
             return true
         }
@@ -250,13 +317,207 @@ class GameOverlayService : Service() {
     // The screen's size in pixels, the same as a screenshot's.
     private fun screenBounds(): Rect = windowManager.currentWindowMetrics.bounds
 
+    private fun panelBusy(): Boolean =
+        outputView?.visibility == View.VISIBLE || teachView?.visibility == View.VISIBLE
+
+    private fun toggleMenu() {
+        if (menuOpen || panelBusy()) collapseAll() else openMenu()
+    }
+
+    private fun openMenu() {
+        handler.removeCallbacks(dockRunnable)
+        docked = false
+        menuOpen = true
+        menuCard?.visibility = View.VISIBLE
+        updateStates()
+        fitOnScreen()
+    }
+
+    private fun closeMenu() {
+        menuOpen = false
+        menuCard?.visibility = View.GONE
+        scheduleDock()
+    }
+
+    private fun collapseAll() {
+        menuOpen = false
+        menuCard?.visibility = View.GONE
+        outputView?.visibility = View.GONE
+        teachView?.visibility = View.GONE
+        scheduleDock()
+    }
+
+    // Keeps the wider panel (menu, text or Teach list) fully on the screen.
+    private fun fitOnScreen() {
+        val view = root ?: return
+        docked = false
+        handler.removeCallbacks(dockRunnable)
+        val bounds = screenBounds()
+        params.x = params.x.coerceIn(dp(8), max(dp(8), bounds.width() - menuWidth - dp(8)))
+        windowManager.updateViewLayout(view, params)
+    }
+
+    private fun scheduleDock() {
+        handler.removeCallbacks(dockRunnable)
+        if (!menuOpen && !docked) handler.postDelayed(dockRunnable, DOCK_DELAY_MS)
+    }
+
+    // Slides the L to the nearest side, leaving only a thin tab visible.
+    private fun dock() {
+        if (menuOpen || docked || panelBusy()) return
+        if (root == null) return
+        val bounds = screenBounds()
+        dockLeft = params.x + handleWidth / 2 < bounds.width() / 2
+        docked = true
+        animateX(if (dockLeft) -(handleWidth - sliver) else bounds.width() - sliver)
+    }
+
+    private fun animateX(target: Int) {
+        ValueAnimator.ofInt(params.x, target).apply {
+            duration = 200
+            addUpdateListener {
+                val view = root ?: return@addUpdateListener
+                params.x = it.animatedValue as Int
+                runCatching { windowManager.updateViewLayout(view, params) }
+            }
+            start()
+        }
+    }
+
+    // The L shows what Auto is doing: L when off, a play sign when on, a pause sign when paused.
+    private fun updateStates() {
+        val running = AutoPlayer.running
+        val paused = AutoPlayer.paused
+        autoTile?.apply {
+            setActive(running)
+            setLabel(if (running) "Auto on" else "Auto")
+        }
+        pauseTile?.apply {
+            setActive(running && paused)
+            setIcon(if (paused) "\u25B6\uFE0F" else "\u23F8\uFE0F")
+            setLabel(if (paused) "Resume" else "Pause")
+        }
+        speedTile?.setLabel("Speed ${AutoPlayer.intervalSeconds(this)}s")
+        handleView?.text = when {
+            running && paused -> "\u23F8\uFE0F"
+            running -> "\u25B6\uFE0F"
+            else -> "L"
+        }
+        val game = LilyAccessibilityService.foregroundGame
+        val gameText = game?.let { appLabel(it) } ?: "No game yet"
+        val focusText = if (currentFocus() != null) "on" else "off"
+        statusLine?.text = "$gameText  |  Focus: $focusText"
+    }
+
+    // ---- Auto ----
+
+    // Starts or stops the autoplay loop with the words saved for the current game.
+    // Starting folds the menu away and docks the L, so it is out of the way of the taps.
+    private fun toggleAuto() {
+        if (AutoPlayer.running) {
+            AutoPlayer.stop()
+            toastShort("Auto stopped")
+            updateStates()
+            return
+        }
+        val targets = AutoPlayer.targets(this)
+        if (targets.isEmpty()) {
+            toast("No words yet. Use Teach on a game screen, or set default words in the LilyAi app")
+            return
+        }
+        if (LilyAccessibilityService.instance == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        AutoPlayer.start(this, targets) { event ->
+            toastShort(event)
+            updateStates()
+        }
+        val stops = AutoPlayer.stopWords(this)
+        val stopNote = if (stops.isEmpty()) "" else ". Stops on: " + stops.joinToString()
+        val focusNote = if (currentFocus() != null) ". Only inside the focus area" else ""
+        toastShort("Auto started: " + targets.joinToString() + stopNote + focusNote)
+        closeMenu()
+        updateStates()
+        handler.removeCallbacks(dockRunnable)
+        handler.postDelayed(dockRunnable, QUICK_DOCK_DELAY_MS)
+    }
+
+    private fun togglePause() {
+        if (!AutoPlayer.running) {
+            toastShort("Auto is not running")
+            return
+        }
+        if (AutoPlayer.paused) AutoPlayer.resume() else AutoPlayer.pause()
+        toastShort(if (AutoPlayer.paused) "Auto paused" else "Auto resumed")
+        updateStates()
+    }
+
+    private fun showLog() {
+        val events = AutoPlayer.recentEvents().take(LOG_LINES)
+        showOutput(AutoPlayer.summary() + "\n" + events.joinToString("\n").ifEmpty { "No events yet" })
+    }
+
+    private fun showOutput(text: String) {
+        val view = outputView ?: return
+        view.text = text
+        view.visibility = View.VISIBLE
+        fitOnScreen()
+    }
+
+    // ---- Chat ----
+
+    private fun openChat() {
+        val window = chat ?: OverlayChat(this, windowManager) { onText -> captureFocusText(onText) }
+        chat = window
+        window.show()
+    }
+
+    // Reads the text inside the focus area (or the whole screen if there is none) for the chat.
+    private fun captureFocusText(onResult: (Result<String>) -> Unit) {
+        val service = LilyAccessibilityService.instance
+        val panel = root
+        if (service == null || panel == null) {
+            onResult(Result.failure(IllegalStateException("Turn on the LilyAi accessibility service first")))
+            return
+        }
+        panel.visibility = View.INVISIBLE
+        chat?.setHidden(true)
+        panel.postDelayed({
+            ScreenshotManager.captureBitmap(service) { captured ->
+                panel.visibility = View.VISIBLE
+                chat?.setHidden(false)
+                captured.onSuccess { bitmap ->
+                    ScreenReader.read(bitmap) { outcome ->
+                        bitmap.recycle()
+                        onResult(
+                            outcome.map { lines ->
+                                FocusArea.filter(lines, currentFocus())
+                                    .sortedBy { it.bounds.top }
+                                    .joinToString("\n") { it.text }
+                                    .take(MAX_ATTACH_CHARS)
+                            }
+                        )
+                    }
+                }.onFailure { onResult(Result.failure(it)) }
+            }
+        }, 400)
+    }
+
+    // ---- Focus area ----
+
     // The focus box saved for the current game, or null if there is none.
     private fun currentFocus(): Rect? {
         val bounds = screenBounds()
         return FocusArea.get(this, LilyAccessibilityService.foregroundGame, bounds.width(), bounds.height())
     }
 
-    // Focus area: draw a box on screen. Read text and Teach then only look inside it.
+    private fun barButton(text: String, onClick: () -> Unit) = pinkButton(text, onClick).apply {
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            .apply { setMargins(dp(3), 0, dp(3), 0) }
+    }
+
+    // Focus area: draw a box on screen. Auto, Read text, Teach and the chat then only look inside it.
     private fun showFocusSelector() {
         if (selector != null) return
         val game = LilyAccessibilityService.foregroundGame
@@ -272,11 +533,6 @@ class GameOverlayService : Service() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
 
-        fun barButton(text: String, onClick: () -> Unit) = pinkButton(text, onClick).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                .apply { setMargins(dp(4), 0, dp(4), 0) }
-        }
-
         val save = barButton("Save") {
             val area = drawing.screenRect()
             if (area == null) {
@@ -285,12 +541,14 @@ class GameOverlayService : Service() {
                 FocusArea.save(this, game, area, bounds.width(), bounds.height())
                 toastShort("Focus area saved for $label")
                 closeFocusSelector()
+                updateStates()
             }
         }
         val clear = barButton("Clear") {
             FocusArea.clear(this, game)
             toastShort("Focus area cleared for $label")
             closeFocusSelector()
+            updateStates()
         }
         val cancel = barButton("Cancel") { closeFocusSelector() }
         val bar = LinearLayout(this).apply {
@@ -335,9 +593,11 @@ class GameOverlayService : Service() {
     }
 
     private fun closeFocusSelector() {
-        selector?.let { windowManager.removeView(it) }
+        selector?.let { runCatching { windowManager.removeView(it) } }
         selector = null
     }
+
+    // ---- Screen tools ----
 
     private fun takeScreenshot() {
         val service = LilyAccessibilityService.instance
@@ -348,9 +608,11 @@ class GameOverlayService : Service() {
         }
         // Hide the overlay first so it does not appear in the screenshot.
         panel.visibility = View.INVISIBLE
+        chat?.setHidden(true)
         panel.postDelayed({
             ScreenshotManager.capture(service) { result ->
                 panel.visibility = View.VISIBLE
+                chat?.setHidden(false)
                 toast(result.fold({ "Screenshot saved" }, { "Failed: ${it.message}" }))
             }
         }, 400)
@@ -358,18 +620,19 @@ class GameOverlayService : Service() {
 
     // Takes a screenshot, reads the text on it and shows the lines in the overlay.
     // With a focus area, only the text inside the box is shown.
-    private fun readScreen(output: TextView) {
+    private fun readScreen() {
         val service = LilyAccessibilityService.instance
         val panel = root
         if (service == null || panel == null) {
             toast("Turn on the LilyAi accessibility service first")
             return
         }
-        output.visibility = View.GONE
         panel.visibility = View.INVISIBLE
+        chat?.setHidden(true)
         panel.postDelayed({
             ScreenshotManager.captureBitmap(service) { captured ->
                 panel.visibility = View.VISIBLE
+                chat?.setHidden(false)
                 captured.onSuccess { bitmap ->
                     ScreenReader.read(bitmap) { outcome ->
                         bitmap.recycle()
@@ -377,12 +640,9 @@ class GameOverlayService : Service() {
                             val focus = currentFocus()
                             val shown = FocusArea.filter(lines, focus)
                             val where = if (focus != null) " in the focus area" else ""
-                            output.text = if (shown.isEmpty()) {
-                                "No text found$where"
-                            } else {
-                                shown.joinToString("\n") { it.text }
-                            }
-                            output.visibility = View.VISIBLE
+                            showOutput(
+                                if (shown.isEmpty()) "No text found$where" else shown.joinToString("\n") { it.text }
+                            )
                         }.onFailure { toast("Failed: ${it.message}") }
                     }
                 }.onFailure { toast("Failed: ${it.message}") }
@@ -402,9 +662,11 @@ class GameOverlayService : Service() {
         }
         teach.visibility = View.GONE
         panel.visibility = View.INVISIBLE
+        chat?.setHidden(true)
         panel.postDelayed({
             ScreenshotManager.captureBitmap(service) { captured ->
                 panel.visibility = View.VISIBLE
+                chat?.setHidden(false)
                 captured.onSuccess { bitmap ->
                     ScreenReader.read(bitmap) { outcome ->
                         bitmap.recycle()
@@ -437,7 +699,7 @@ class GameOverlayService : Service() {
         fun line(content: String, size: Float) = TextView(this).apply {
             text = content
             textSize = size
-            setTextColor(Color.WHITE)
+            setTextColor(Palette.plum)
         }
 
         val choices = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -446,7 +708,7 @@ class GameOverlayService : Service() {
             choices.addView(
                 CheckBox(this).apply {
                     text = word
-                    setTextColor(Color.WHITE)
+                    setTextColor(Palette.plum)
                     setOnCheckedChangeListener { _, checked ->
                         if (checked) picked.add(word) else picked.remove(word)
                     }
@@ -455,42 +717,36 @@ class GameOverlayService : Service() {
         }
 
         // Save: Auto taps these words. Save as stop: Auto stops when it sees one of these.
-        val save = Button(this).apply {
-            text = "Save"
-            setOnClickListener {
-                if (picked.isEmpty()) {
-                    toastShort("Tick the words to tap first")
-                } else {
-                    AutoPlayer.addWords(this@GameOverlayService, game, picked)
-                    toastShort("Saved for $label: " + picked.joinToString())
-                    teach.visibility = View.GONE
-                }
-            }
-        }
-        val saveStop = Button(this).apply {
-            text = "Save as stop"
-            setOnClickListener {
-                if (picked.isEmpty()) {
-                    toastShort("Tick the stop words first")
-                } else {
-                    AutoPlayer.addStopWords(this@GameOverlayService, game, picked)
-                    toastShort("Stop words for $label: " + picked.joinToString())
-                    teach.visibility = View.GONE
-                }
-            }
-        }
-        val clear = Button(this).apply {
-            text = "Clear all"
-            setOnClickListener {
-                AutoPlayer.saveWordsFor(this@GameOverlayService, game, "")
-                AutoPlayer.saveStopWordsFor(this@GameOverlayService, game, "")
-                toastShort("Cleared the words and stop words for $label")
+        val save = barButton("Save") {
+            if (picked.isEmpty()) {
+                toastShort("Tick the words to tap first")
+            } else {
+                AutoPlayer.addWords(this, game, picked)
+                toastShort("Saved for $label: " + picked.joinToString())
                 teach.visibility = View.GONE
+                scheduleDock()
             }
         }
-        val close = Button(this).apply {
-            text = "Close"
-            setOnClickListener { teach.visibility = View.GONE }
+        val saveStop = barButton("Save as stop") {
+            if (picked.isEmpty()) {
+                toastShort("Tick the stop words first")
+            } else {
+                AutoPlayer.addStopWords(this, game, picked)
+                toastShort("Stop words for $label: " + picked.joinToString())
+                teach.visibility = View.GONE
+                scheduleDock()
+            }
+        }
+        val clear = barButton("Clear all") {
+            AutoPlayer.saveWordsFor(this, game, "")
+            AutoPlayer.saveStopWordsFor(this, game, "")
+            toastShort("Cleared the words and stop words for $label")
+            teach.visibility = View.GONE
+            scheduleDock()
+        }
+        val close = barButton("Close") {
+            teach.visibility = View.GONE
+            scheduleDock()
         }
         val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -509,45 +765,18 @@ class GameOverlayService : Service() {
         teach.addView(line("Stops on: $savedStops", 12f))
         teach.addView(
             ScrollView(this).apply { addView(choices) },
-            LinearLayout.LayoutParams(TEACH_WIDTH, TEACH_HEIGHT)
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, TEACH_HEIGHT)
         )
         teach.addView(topRow)
         teach.addView(bottomRow)
         teach.visibility = View.VISIBLE
+        fitOnScreen()
     }
 
     private fun appLabel(packageName: String): String =
         runCatching {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
         }.getOrDefault(packageName)
-
-    // Starts or stops the autoplay loop with the words saved for the current game.
-    // Drag the handle away from anything the loop needs to tap: taps go to whatever is on top.
-    private fun toggleAuto(button: Button) {
-        if (AutoPlayer.running) {
-            AutoPlayer.stop()
-            button.text = AUTO_OFF
-            toastShort("Auto stopped")
-            return
-        }
-        val targets = AutoPlayer.targets(this)
-        if (targets.isEmpty()) {
-            toast("No words yet. Use Teach on a game screen, or set default words in the LilyAi app")
-            return
-        }
-        if (LilyAccessibilityService.instance == null) {
-            toast("Turn on the LilyAi accessibility service first")
-            return
-        }
-        AutoPlayer.start(this, targets) { event ->
-            toastShort(event)
-            if (!AutoPlayer.running) button.text = AUTO_OFF
-        }
-        button.text = AUTO_ON
-        val stops = AutoPlayer.stopWords(this)
-        val stopNote = if (stops.isEmpty()) "" else ". Stops on: " + stops.joinToString()
-        toastShort("Auto started: " + targets.joinToString() + stopNote)
-    }
 
     private fun toast(message: String) =
         Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
@@ -559,11 +788,13 @@ class GameOverlayService : Service() {
         const val CHANNEL_ID = "overlay"
         const val NOTIFICATION_ID = 1
         const val TAP_SLOP = 10
-        const val AUTO_ON = "Auto: ON"
-        const val AUTO_OFF = "Auto: OFF"
-        const val TEACH_WIDTH = 600
-        const val TEACH_HEIGHT = 500
+        const val TEACH_HEIGHT = 420
         const val MAX_CHOICES = 40
         const val LOG_LINES = 10
+        const val MAX_ATTACH_CHARS = 2000
+        const val DOCK_DELAY_MS = 3000L
+        const val QUICK_DOCK_DELAY_MS = 600L
+        const val DOTS_FIRST = "\u25CF  \u25CB"
+        const val DOTS_SECOND = "\u25CB  \u25CF"
     }
 }

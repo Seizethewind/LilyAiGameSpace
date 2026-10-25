@@ -4,14 +4,15 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.lilyai.accessibility.LilyAccessibilityService
+import com.lilyai.capture.FocusArea
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 // Autoplay loop: every couple of seconds, look at the screen. If a stop word is there, stop.
-// Otherwise tap the first of the chosen words that is there. Runs until stop() is called or
-// something keeps failing. Each game can have its own words. The default words are used when a
-// game has none.
+// Otherwise tap the first of the chosen words that is there, looking only inside the focus area
+// when one is set. It can be paused and resumed. Each game can have its own words. The default
+// words are used when a game has none.
 object AutoPlayer {
 
     private const val DEFAULT_INTERVAL_MS = 2000L
@@ -28,6 +29,7 @@ object AutoPlayer {
     private val handler = Handler(Looper.getMainLooper())
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
     private val events = ArrayDeque<String>()
+    private var appContext: Context? = null
     private var generation = 0
     private var errors = 0
     private var scans = 0
@@ -35,6 +37,10 @@ object AutoPlayer {
     private var currentInterval = DEFAULT_INTERVAL_MS
 
     var running = false
+        private set
+
+    /** True while Auto is on but waiting. It keeps its place and does nothing until resumed. */
+    var paused = false
         private set
 
     /** The default words as the user typed them, for example "Next, OK, Skip". */
@@ -103,7 +109,10 @@ object AutoPlayer {
     }
 
     /** One line: whether Auto is on, and how many looks and taps since it started. */
-    fun summary(): String = "Auto " + (if (running) "ON" else "OFF") + ": $scans scans, $taps taps"
+    fun summary(): String {
+        val state = if (!running) "OFF" else if (paused) "PAUSED" else "ON"
+        return "Auto $state: $scans scans, $taps taps"
+    }
 
     /** The latest events, newest first. */
     fun recentEvents(): List<String> = events.toList().asReversed()
@@ -111,7 +120,9 @@ object AutoPlayer {
     /** Starts the loop. onEvent reports each tap and why the loop stopped by itself. */
     fun start(context: Context, targets: List<String>, onEvent: (String) -> Unit) {
         if (running) return
+        appContext = context.applicationContext
         running = true
+        paused = false
         errors = 0
         scans = 0
         taps = 0
@@ -123,9 +134,22 @@ object AutoPlayer {
         step(generation, targets, stops, onEvent)
     }
 
+    fun pause() {
+        if (!running || paused) return
+        paused = true
+        record("Paused")
+    }
+
+    fun resume() {
+        if (!running || !paused) return
+        paused = false
+        record("Resumed")
+    }
+
     fun stop(reason: String = "Stopped") {
         if (running) record(reason)
         running = false
+        paused = false
         generation++
         handler.removeCallbacksAndMessages(null)
     }
@@ -142,11 +166,16 @@ object AutoPlayer {
             halt("Auto stopped: the accessibility service is off", onEvent)
             return
         }
+        // Paused: the loop stays alive but does nothing until it is resumed.
+        if (paused) {
+            scheduleNext(run, targets, stops, onEvent)
+            return
+        }
         ScreenActions.readScreen(service) { result ->
             if (!running || run != generation) return@readScreen
             scans++
-            val lines = result.getOrNull()
-            if (lines == null) {
+            val look = result.getOrNull()
+            if (look == null) {
                 errors++
                 val message = result.exceptionOrNull()?.message
                 record("Error: $message")
@@ -159,15 +188,25 @@ object AutoPlayer {
             }
             errors = 0
 
-            // A stop word always wins over a word to tap.
-            val stopHit = ScreenActions.findFirst(lines, stops)
+            // Paused while this look was being taken: do nothing with it.
+            if (paused) {
+                scheduleNext(run, targets, stops, onEvent)
+                return@readScreen
+            }
+
+            // A stop word anywhere on the screen wins, so Auto stops even for a popup outside the focus area.
+            val stopHit = ScreenActions.findFirst(look.lines, stops)
             if (stopHit != null) {
                 halt("Auto stopped: saw ${stopHit.text}", onEvent)
                 return@readScreen
             }
 
+            // Words to tap are only looked for inside the focus area, if one is set.
+            val game = LilyAccessibilityService.foregroundGame
+            val focus = appContext?.let { FocusArea.get(it, game, look.width, look.height) }
+            val match = ScreenActions.findFirst(FocusArea.filter(look.lines, focus), targets)
+
             // Nothing to tap on this screen is normal, so keep looping quietly.
-            val match = ScreenActions.findFirst(lines, targets)
             if (match == null) {
                 scheduleNext(run, targets, stops, onEvent)
                 return@readScreen

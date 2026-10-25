@@ -5,19 +5,24 @@ import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenText
 import com.lilyai.capture.ScreenshotManager
 
+/** The lines of text found on one screenshot, and the screenshot's size in pixels. */
+class ScreenLook(val lines: List<ScreenText>, val width: Int, val height: Int)
+
 // Building blocks for autoplay: look at the screen, find something, act on it.
 object ScreenActions {
 
     /** Takes a screenshot and reads the lines of text on it. */
     fun readScreen(
         service: LilyAccessibilityService,
-        onResult: (Result<List<ScreenText>>) -> Unit
+        onResult: (Result<ScreenLook>) -> Unit
     ) {
         ScreenshotManager.captureBitmap(service) { captured ->
             captured.onSuccess { bitmap ->
+                val width = bitmap.width
+                val height = bitmap.height
                 ScreenReader.read(bitmap) { outcome ->
                     bitmap.recycle()
-                    onResult(outcome)
+                    onResult(outcome.map { lines -> ScreenLook(lines, width, height) })
                 }
             }.onFailure { onResult(Result.failure(it)) }
         }
@@ -56,8 +61,8 @@ object ScreenActions {
         onResult: (Result<ScreenText>) -> Unit
     ) {
         readScreen(service) { result ->
-            result.onSuccess { lines ->
-                val match = findFirst(lines, queries)
+            result.onSuccess { look ->
+                val match = findFirst(look.lines, queries)
                 if (match == null) {
                     val wanted = queries.joinToString(" / ")
                     onResult(Result.failure(NoSuchElementException("Not found on screen: $wanted")))
