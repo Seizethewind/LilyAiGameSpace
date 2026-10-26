@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -31,6 +32,8 @@ import com.lilyai.capture.FocusArea
 import com.lilyai.capture.ScreenReader
 import com.lilyai.capture.ScreenText
 import com.lilyai.capture.ScreenshotManager
+import com.lilyai.chess.BoardReader
+import com.lilyai.chess.ChessStore
 import com.lilyai.ui.Palette
 import com.lilyai.ui.dp
 import com.lilyai.ui.pinkButton
@@ -39,9 +42,10 @@ import kotlin.math.max
 
 // The overlay: a small pink L that sits over other apps.
 // - It slides to the screen edge when idle, leaving a thin tab. Swipe the tab inward, or tap it.
-// - Tapping the L opens a menu with two pages. Swipe sideways to move between them.
+// - Tapping the L opens a menu with three pages. Swipe sideways to move between them.
 //   Page 1: Chat, Focus area, Teach, Auto, Pause, Stop overlay.
 //   Page 2: Screenshot, Read text, Speed, Auto log.
+//   Page 3: Chess: Calibrate board, Read board, which side is at the bottom.
 // It runs as a foreground service so Android keeps it alive while a game is open.
 class GameOverlayService : Service() {
 
@@ -61,6 +65,7 @@ class GameOverlayService : Service() {
     private var autoTile: Tile? = null
     private var pauseTile: Tile? = null
     private var speedTile: Tile? = null
+    private var sideTile: Tile? = null
 
     private var menuOpen = false
     private var docked = false
@@ -165,6 +170,17 @@ class GameOverlayService : Service() {
             showLog()
         }
 
+        // Page 3: chess
+        val calibrateTile = Tile(this, "\u265F\uFE0F", "Calibrate board") {
+            closeMenu()
+            calibrateChess()
+        }
+        val boardTile = Tile(this, "\u265E", "Read board") {
+            closeMenu()
+            readChess()
+        }
+        val side = Tile(this, "\u26AA", "White at bottom") { toggleBoardSide() }
+
         val pageWidth = menuWidth - dp(20)
         fun page(vararg rows: LinearLayout) = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -175,21 +191,22 @@ class GameOverlayService : Service() {
             orientation = LinearLayout.HORIZONTAL
             addView(page(tileRow(chatTile, focusTile, teachTile), tileRow(auto, pause, stopTile)))
             addView(page(tileRow(shot, read, speed), tileRow(logTile, null, null)))
+            addView(page(tileRow(calibrateTile, boardTile, side)))
         }
         val dots = TextView(this).apply {
-            text = DOTS_FIRST
+            text = dotsFor(0)
             gravity = Gravity.CENTER
             setTextColor(Palette.pinkDeep)
         }
         val pager = PagerScroll(this).apply {
             addView(pages)
             setOnScrollChangeListener { _, scrollX, _, _, _ ->
-                dots.text = if (scrollX >= pageWidth / 2) DOTS_SECOND else DOTS_FIRST
+                dots.text = dotsFor(pageAt(scrollX, pageWidth))
             }
-            // When the finger lifts, settle on the nearer page.
+            // When the finger lifts, settle on the nearest page.
             setOnTouchListener { _, event ->
                 if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
-                    val target = if (scrollX >= pageWidth / 2) pageWidth else 0
+                    val target = pageAt(scrollX, pageWidth) * pageWidth
                     post { smoothScrollTo(target, 0) }
                 }
                 false
@@ -208,11 +225,11 @@ class GameOverlayService : Service() {
             addView(dots)
         }
 
-        // Shows the text found on screen, or the Auto log. Tap it to hide it.
+        // Shows the text found on screen, the Auto log, or the chess board. Tap it to hide it.
         val output = TextView(this).apply {
             visibility = View.GONE
             textSize = 12f
-            maxLines = 12
+            maxLines = 14
             setTextColor(Palette.plum)
             background = this@GameOverlayService.panelBackground()
             setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -267,9 +284,16 @@ class GameOverlayService : Service() {
         autoTile = auto
         pauseTile = pause
         speedTile = speed
+        sideTile = side
         updateStates()
         scheduleDock()
     }
+
+    private fun pageAt(scrollX: Int, pageWidth: Int): Int =
+        ((scrollX + pageWidth / 2) / pageWidth).coerceIn(0, PAGE_COUNT - 1)
+
+    private fun dotsFor(page: Int): String =
+        (0 until PAGE_COUNT).joinToString("  ") { if (it == page) "\u25CF" else "\u25CB" }
 
     // ---- Moving, docking and the menu ----
 
@@ -398,6 +422,11 @@ class GameOverlayService : Service() {
             setLabel(if (paused) "Resume" else "Pause")
         }
         speedTile?.setLabel("Speed ${AutoPlayer.intervalSeconds(this)}s")
+        val whiteAtBottom = ChessStore.whiteAtBottom(this, chessGameKey())
+        sideTile?.apply {
+            setIcon(if (whiteAtBottom) "\u26AA" else "\u26AB")
+            setLabel(if (whiteAtBottom) "White at bottom" else "Black at bottom")
+        }
         handleView?.text = when {
             running && paused -> "\u23F8\uFE0F"
             running -> "\u25B6\uFE0F"
@@ -458,11 +487,90 @@ class GameOverlayService : Service() {
         showOutput(AutoPlayer.summary() + "\n" + events.joinToString("\n").ifEmpty { "No events yet" })
     }
 
-    private fun showOutput(text: String) {
+    // Shows text under the L. The chess board needs a font with equal-width letters to line up.
+    private fun showOutput(text: String, monospace: Boolean = false) {
         val view = outputView ?: return
+        view.typeface = if (monospace) Typeface.MONOSPACE else Typeface.DEFAULT
         view.text = text
         view.visibility = View.VISIBLE
         fitOnScreen()
+    }
+
+    // ---- Chess ----
+
+    // Chess settings are kept per game, like the focus box. Without a known game they use "default".
+    private fun chessGameKey(): String = LilyAccessibilityService.foregroundGame ?: "default"
+
+    private fun toggleBoardSide() {
+        val key = chessGameKey()
+        val whiteAtBottom = !ChessStore.whiteAtBottom(this, key)
+        ChessStore.setWhiteAtBottom(this, key, whiteAtBottom)
+        updateStates()
+        toastShort(if (whiteAtBottom) "White is at the bottom" else "Black is at the bottom")
+    }
+
+    // Learns what the pieces look like. The game must be at the starting position, with the focus
+    // box drawn tightly around the board.
+    private fun calibrateChess() {
+        val board = currentFocus()
+        if (board == null) {
+            toast("Draw the board with Focus area first, then try again")
+            return
+        }
+        val key = chessGameKey()
+        captureForChess { bitmap ->
+            BoardReader.calibrate(bitmap, board, ChessStore.whiteAtBottom(this, key))
+                .onSuccess { calibration ->
+                    ChessStore.saveCalibration(this, key, calibration)
+                    showOutput(
+                        "Learned " + calibration.templates.size + " pieces from the starting position. " +
+                            "Now try Read board."
+                    )
+                }
+                .onFailure { showOutput("Calibration failed: ${it.message}") }
+        }
+    }
+
+    // Reads the position on the board and shows it, so you can check it is right.
+    private fun readChess() {
+        val board = currentFocus()
+        if (board == null) {
+            toast("Draw the board with Focus area first, then try again")
+            return
+        }
+        val key = chessGameKey()
+        val calibration = ChessStore.loadCalibration(this, key)
+        if (calibration == null) {
+            toast("Calibrate first, with the game at the starting position")
+            return
+        }
+        captureForChess { bitmap ->
+            runCatching { BoardReader.read(bitmap, board, ChessStore.whiteAtBottom(this, key), calibration) }
+                .onSuccess { showOutput(it.describe(), monospace = true) }
+                .onFailure { showOutput("Could not read the board: ${it.message}") }
+        }
+    }
+
+    // Takes a screenshot with the overlay out of the way, and hands it over. It is recycled afterwards.
+    private fun captureForChess(onBitmap: (Bitmap) -> Unit) {
+        val service = LilyAccessibilityService.instance
+        val panel = root
+        if (service == null || panel == null) {
+            toast("Turn on the LilyAi accessibility service first")
+            return
+        }
+        panel.visibility = View.INVISIBLE
+        chat?.setHidden(true)
+        panel.postDelayed({
+            ScreenshotManager.captureBitmap(service) { captured ->
+                panel.visibility = View.VISIBLE
+                chat?.setHidden(false)
+                captured.onSuccess { bitmap ->
+                    onBitmap(bitmap)
+                    bitmap.recycle()
+                }.onFailure { toast("Failed: ${it.message}") }
+            }
+        }, 400)
     }
 
     // ---- Chat ----
@@ -517,7 +625,8 @@ class GameOverlayService : Service() {
             .apply { setMargins(dp(3), 0, dp(3), 0) }
     }
 
-    // Focus area: draw a box on screen. Auto, Read text, Teach and the chat then only look inside it.
+    // Focus area: draw a box on screen. Auto, Read text, Teach, the chat and the chess board then
+    // only look inside it.
     private fun showFocusSelector() {
         if (selector != null) return
         val game = LilyAccessibilityService.foregroundGame
@@ -788,13 +897,12 @@ class GameOverlayService : Service() {
         const val CHANNEL_ID = "overlay"
         const val NOTIFICATION_ID = 1
         const val TAP_SLOP = 10
+        const val PAGE_COUNT = 3
         const val TEACH_HEIGHT = 420
         const val MAX_CHOICES = 40
         const val LOG_LINES = 10
         const val MAX_ATTACH_CHARS = 2000
         const val DOCK_DELAY_MS = 3000L
         const val QUICK_DOCK_DELAY_MS = 600L
-        const val DOTS_FIRST = "\u25CF  \u25CB"
-        const val DOTS_SECOND = "\u25CB  \u25CF"
     }
 }
